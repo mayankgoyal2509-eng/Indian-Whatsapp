@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>IndiChat</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- LOGIN / REGISTER SCREEN -->
+  <div id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="tricolor-bar"></div>
+      <h1>IndiChat</h1>
+      <p class="tagline">Simple, fast, real-time messaging</p>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Log in</button>
+        <button class="auth-tab" data-tab="register">Sign up</button>
+      </div>
+
+      <form id="login-form" class="auth-form">
+        <input type="tel" id="login-phone" placeholder="Phone number" required />
+        <input type="password" id="login-password" placeholder="Password" required />
+        <button type="submit">Log in</button>
+      </form>
+
+      <form id="register-form" class="auth-form hidden">
+        <input type="text" id="register-name" placeholder="Your name" required />
+        <input type="tel" id="register-phone" placeholder="Phone number" required />
+        <input type="password" id="register-password" placeholder="Password (min 6 characters)" required minlength="6" />
+        <button type="submit">Sign up</button>
+      </form>
+
+      <p id="auth-error" class="auth-error hidden"></p>
+    </div>
+  </div>
+
+  <!-- CHAT APP SCREEN -->
+  <div id="app-screen" class="screen hidden">
+    <div class="app-container">
+
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="my-name" id="my-name"></div>
+          <button id="new-group-btn" class="new-group-btn" title="New group">+ Group</button>
+        </div>
+        <div class="contact-list" id="contact-list"></div>
+      </div>
+
+      <!-- Chat window -->
+      <div class="chat-panel">
+        <div id="chat-empty" class="chat-empty">
+          Select a chat to start messaging
+        </div>
+
+        <div id="chat-active" class="chat-active hidden">
+          <div class="chat-header">
+            <div class="chat-contact-name" id="chat-contact-name"></div>
+            <div class="chat-contact-status" id="chat-contact-status"></div>
+          </div>
+
+          <div class="messages" id="messages"></div>
+
+          <div class="typing-indicator hidden" id="typing-indicator">typing…</div>
+
+          <form id="message-form" class="message-form">
+            <input type="text" id="message-input" placeholder="Type a message" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- NEW GROUP MODAL -->
+  <div id="group-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>New group</h3>
+      <input type="text" id="group-name-input" placeholder="Group name" />
+      <div id="group-member-list" class="group-member-list"></div>
+      <div class="modal-actions">
+        <button id="group-cancel-btn" class="btn-secondary">Cancel</button>
+        <button id="group-create-btn" class="btn-primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
