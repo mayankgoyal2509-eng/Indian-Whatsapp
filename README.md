@@ -6,10 +6,13 @@ password auth, WhatsApp-style frontend.
 ## What's included
 - Password auth (sign up / log in, bcrypt-hashed passwords, JWT sessions)
 - Permanent hosted PostgreSQL database (data survives restarts/redeploys)
+- Contacts are private, not a public directory — add someone by their phone
+  number, or they appear automatically once you've exchanged messages
 - 1-to-1 real-time messaging (Socket.io)
 - Group chats
 - Blue-tick read receipts for 1-to-1 chats
 - Online/offline status + typing indicator
+- Logout button
 
 ## Coming in later layers
 - Media / voice message sharing

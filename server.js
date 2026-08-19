@@ -95,9 +95,51 @@ app.post('/api/login', h(async (req, res) => {
 
 // ---------- contacts ----------
 
-app.get('/api/users', authenticate, h(async (req, res) => {
-  const users = await db.all('SELECT id, name, phone FROM users WHERE id != $1', [req.userId]);
-  res.json(users);
+// Search for a user by exact phone number (to add them as a contact).
+// Does NOT return a directory of everyone — only an exact phone match.
+app.get('/api/users/search', authenticate, h(async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.status(400).json({ error: 'Phone number is required' });
+
+  const user = await db.get('SELECT id, name, phone FROM users WHERE phone = $1', [phone]);
+  if (!user) return res.status(404).json({ error: 'No account found with that phone number' });
+  if (user.id === req.userId) return res.status(400).json({ error: "That's your own number" });
+
+  res.json(user);
+}));
+
+app.post('/api/contacts', authenticate, h(async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Phone number is required' });
+
+  const target = await db.get('SELECT id, name, phone FROM users WHERE phone = $1', [phone]);
+  if (!target) return res.status(404).json({ error: 'No account found with that phone number' });
+  if (target.id === req.userId) return res.status(400).json({ error: "That's your own number" });
+
+  await db.run(
+    'INSERT INTO contacts (owner_id, contact_id, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+    [req.userId, target.id, Date.now()]
+  );
+
+  res.json(target);
+}));
+
+// Your chat list: people you've explicitly added, plus anyone you already
+// have a direct message history with (so incoming messages aren't lost).
+app.get('/api/contacts', authenticate, h(async (req, res) => {
+  const contacts = await db.all(
+    `SELECT DISTINCT u.id, u.name, u.phone FROM users u
+     WHERE u.id IN (
+       SELECT contact_id FROM contacts WHERE owner_id = $1
+       UNION
+       SELECT from_user FROM messages WHERE to_user = $1
+       UNION
+       SELECT to_user FROM messages WHERE from_user = $1
+     )
+     AND u.id != $1`,
+    [req.userId]
+  );
+  res.json(contacts);
 }));
 
 // ---------- direct messages ----------

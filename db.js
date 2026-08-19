@@ -38,6 +38,13 @@ const SCHEMA = `
     read INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS contacts (
+    owner_id TEXT NOT NULL,
+    contact_id TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (owner_id, contact_id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_direct ON messages(from_user, to_user);
   CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id);
 `;
