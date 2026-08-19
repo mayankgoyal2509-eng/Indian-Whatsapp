@@ -1,11 +1,9 @@
-const initSqlJs = require('sql.js');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg');
 
-const DATA_DIR = path.join(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'indichat.sqlite');
-
-let sqlDb = null;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -13,14 +11,14 @@ const SCHEMA = `
     name TEXT NOT NULL,
     phone TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at BIGINT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     created_by TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at BIGINT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS group_members (
@@ -35,7 +33,7 @@ const SCHEMA = `
     to_user TEXT,
     group_id TEXT,
     text TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
+    timestamp BIGINT NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
     read INTEGER NOT NULL DEFAULT 0
   );
@@ -44,55 +42,26 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id);
 `;
 
-function persist() {
-  const data = sqlDb.export();
-  fs.writeFileSync(DB_FILE, Buffer.from(data));
-}
+async function init() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL environment variable is not set. Add your Postgres connection string.');
+  }
+  await pool.query(SCHEMA);
 
-// Mimics the better-sqlite3 prepare().run()/.get()/.all() API so the rest
-// of the app can use familiar syntax, backed by sql.js underneath.
-function prepare(sql) {
   return {
-    run(...params) {
-      const stmt = sqlDb.prepare(sql);
-      stmt.bind(params);
-      stmt.step();
-      stmt.free();
-      persist();
+    // sql uses $1, $2... placeholders (Postgres style)
+    async get(sql, params = []) {
+      const result = await pool.query(sql, params);
+      return result.rows[0];
     },
-    get(...params) {
-      const stmt = sqlDb.prepare(sql);
-      stmt.bind(params);
-      let result;
-      if (stmt.step()) result = stmt.getAsObject();
-      stmt.free();
-      return result;
+    async all(sql, params = []) {
+      const result = await pool.query(sql, params);
+      return result.rows;
     },
-    all(...params) {
-      const stmt = sqlDb.prepare(sql);
-      stmt.bind(params);
-      const rows = [];
-      while (stmt.step()) rows.push(stmt.getAsObject());
-      stmt.free();
-      return rows;
+    async run(sql, params = []) {
+      await pool.query(sql, params);
     },
   };
-}
-
-async function init() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  const SQL = await initSqlJs();
-
-  if (fs.existsSync(DB_FILE)) {
-    sqlDb = new SQL.Database(fs.readFileSync(DB_FILE));
-  } else {
-    sqlDb = new SQL.Database();
-  }
-
-  sqlDb.exec(SCHEMA);
-  persist();
-
-  return { prepare };
 }
 
 module.exports = { init };

@@ -44,9 +44,17 @@ function authenticate(req, res, next) {
   }
 }
 
+// wraps an async route handler so thrown errors become 500s instead of crashing the process
+function h(fn) {
+  return (req, res) => fn(req, res).catch((err) => {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  });
+}
+
 // ---------- auth routes ----------
 
-app.post('/api/register', (req, res) => {
+app.post('/api/register', h(async (req, res) => {
   const { name, phone, password } = req.body;
   if (!name || !phone || !password) {
     return res.status(400).json({ error: 'Name, phone and password are required' });
@@ -55,7 +63,7 @@ app.post('/api/register', (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE phone = ?').get(phone);
+  const existing = await db.get('SELECT id FROM users WHERE phone = $1', [phone]);
   if (existing) return res.status(409).json({ error: 'An account with this phone number already exists' });
 
   const user = {
@@ -65,120 +73,125 @@ app.post('/api/register', (req, res) => {
     password_hash: bcrypt.hashSync(password, 10),
     created_at: Date.now(),
   };
-  db.prepare(
-    'INSERT INTO users (id, name, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(user.id, user.name, user.phone, user.password_hash, user.created_at);
+  await db.run(
+    'INSERT INTO users (id, name, phone, password_hash, created_at) VALUES ($1, $2, $3, $4, $5)',
+    [user.id, user.name, user.phone, user.password_hash, user.created_at]
+  );
 
   res.json({ user: publicUser(user), token: signToken(user) });
-});
+}));
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', h(async (req, res) => {
   const { phone, password } = req.body;
   if (!phone || !password) return res.status(400).json({ error: 'Phone and password are required' });
 
-  const user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone);
+  const user = await db.get('SELECT * FROM users WHERE phone = $1', [phone]);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Incorrect phone number or password' });
   }
 
   res.json({ user: publicUser(user), token: signToken(user) });
-});
+}));
 
 // ---------- contacts ----------
 
-app.get('/api/users', authenticate, (req, res) => {
-  const users = db.prepare('SELECT id, name, phone FROM users WHERE id != ?').all(req.userId);
+app.get('/api/users', authenticate, h(async (req, res) => {
+  const users = await db.all('SELECT id, name, phone FROM users WHERE id != $1', [req.userId]);
   res.json(users);
-});
+}));
 
 // ---------- direct messages ----------
 
-app.get('/api/messages/:otherId', authenticate, (req, res) => {
+app.get('/api/messages/:otherId', authenticate, h(async (req, res) => {
   const { otherId } = req.params;
-  const messages = db
-    .prepare(
-      `SELECT * FROM messages
-       WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
-       ORDER BY timestamp ASC`
-    )
-    .all(req.userId, otherId, otherId, req.userId);
+  const messages = await db.all(
+    `SELECT * FROM messages
+     WHERE (from_user = $1 AND to_user = $2) OR (from_user = $2 AND to_user = $1)
+     ORDER BY timestamp ASC`,
+    [req.userId, otherId]
+  );
   res.json(messages);
-});
+}));
 
 // Mark all messages from `otherId` to me as read
-app.post('/api/messages/:otherId/read', authenticate, (req, res) => {
+app.post('/api/messages/:otherId/read', authenticate, h(async (req, res) => {
   const { otherId } = req.params;
-  db.prepare(
-    'UPDATE messages SET read = 1 WHERE from_user = ? AND to_user = ? AND read = 0'
-  ).run(otherId, req.userId);
+  await db.run(
+    'UPDATE messages SET read = 1 WHERE from_user = $1 AND to_user = $2 AND read = 0',
+    [otherId, req.userId]
+  );
 
   const targetSocketId = onlineUsers.get(otherId);
   if (targetSocketId) io.to(targetSocketId).emit('messages_read', { by: req.userId });
 
   res.json({ ok: true });
-});
+}));
 
 // ---------- groups ----------
 
-app.post('/api/groups', authenticate, (req, res) => {
+app.post('/api/groups', authenticate, h(async (req, res) => {
   const { name, memberIds } = req.body;
   if (!name || !Array.isArray(memberIds) || memberIds.length === 0) {
     return res.status(400).json({ error: 'Group name and at least one member are required' });
   }
 
   const groupId = makeId();
-  db.prepare('INSERT INTO groups (id, name, created_by, created_at) VALUES (?, ?, ?, ?)').run(
+  await db.run('INSERT INTO groups (id, name, created_by, created_at) VALUES ($1, $2, $3, $4)', [
     groupId,
     name,
     req.userId,
-    Date.now()
-  );
+    Date.now(),
+  ]);
 
-  const insertMember = db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)');
-  insertMember.run(groupId, req.userId);
-  memberIds.forEach((uid) => insertMember.run(groupId, uid));
+  const allMemberIds = [req.userId, ...memberIds];
+  for (const uid of allMemberIds) {
+    await db.run(
+      'INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [groupId, uid]
+    );
+  }
 
   res.json({ id: groupId, name });
-});
+}));
 
-app.get('/api/groups', authenticate, (req, res) => {
-  const groups = db
-    .prepare(
-      `SELECT g.id, g.name FROM groups g
-       JOIN group_members gm ON gm.group_id = g.id
-       WHERE gm.user_id = ?`
-    )
-    .all(req.userId);
+app.get('/api/groups', authenticate, h(async (req, res) => {
+  const groups = await db.all(
+    `SELECT g.id, g.name FROM groups g
+     JOIN group_members gm ON gm.group_id = g.id
+     WHERE gm.user_id = $1`,
+    [req.userId]
+  );
   res.json(groups);
-});
+}));
 
-app.get('/api/groups/:groupId/members', authenticate, (req, res) => {
-  const isMember = db
-    .prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?')
-    .get(req.params.groupId, req.userId);
+app.get('/api/groups/:groupId/members', authenticate, h(async (req, res) => {
+  const isMember = await db.get(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [req.params.groupId, req.userId]
+  );
   if (!isMember) return res.status(403).json({ error: 'Not a member of this group' });
 
-  const members = db
-    .prepare(
-      `SELECT u.id, u.name FROM users u
-       JOIN group_members gm ON gm.user_id = u.id
-       WHERE gm.group_id = ?`
-    )
-    .all(req.params.groupId);
+  const members = await db.all(
+    `SELECT u.id, u.name FROM users u
+     JOIN group_members gm ON gm.user_id = u.id
+     WHERE gm.group_id = $1`,
+    [req.params.groupId]
+  );
   res.json(members);
-});
+}));
 
-app.get('/api/groups/:groupId/messages', authenticate, (req, res) => {
-  const isMember = db
-    .prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?')
-    .get(req.params.groupId, req.userId);
+app.get('/api/groups/:groupId/messages', authenticate, h(async (req, res) => {
+  const isMember = await db.get(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [req.params.groupId, req.userId]
+  );
   if (!isMember) return res.status(403).json({ error: 'Not a member of this group' });
 
-  const messages = db
-    .prepare('SELECT * FROM messages WHERE group_id = ? ORDER BY timestamp ASC')
-    .all(req.params.groupId);
+  const messages = await db.all('SELECT * FROM messages WHERE group_id = $1 ORDER BY timestamp ASC', [
+    req.params.groupId,
+  ]);
   res.json(messages);
-});
+}));
 
 // ---------- real-time layer ----------
 
@@ -199,7 +212,7 @@ io.on('connection', (socket) => {
   io.emit('presence_update', Array.from(onlineUsers.keys()));
 
   // ---- direct messages ----
-  socket.on('send_message', ({ to, text }) => {
+  socket.on('send_message', async ({ to, text }) => {
     if (!to || !text) return;
     const message = {
       id: makeId(),
@@ -218,51 +231,60 @@ io.on('connection', (socket) => {
       io.to(targetSocketId).emit('receive_message', message);
     }
 
-    db.prepare(
-      `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
-       VALUES (?, ?, ?, NULL, ?, ?, ?, 0)`
-    ).run(message.id, message.from_user, message.to_user, message.text, message.timestamp, message.delivered);
-
-    socket.emit('message_sent', message);
+    try {
+      await db.run(
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0)`,
+        [message.id, message.from_user, message.to_user, message.text, message.timestamp, message.delivered]
+      );
+      socket.emit('message_sent', message);
+    } catch (err) {
+      console.error('send_message error:', err);
+    }
   });
 
   // ---- group messages ----
-  socket.on('send_group_message', ({ groupId, text }) => {
+  socket.on('send_group_message', async ({ groupId, text }) => {
     if (!groupId || !text) return;
-    const isMember = db
-      .prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?')
-      .get(groupId, socket.userId);
-    if (!isMember) return;
+    try {
+      const isMember = await db.get(
+        'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+        [groupId, socket.userId]
+      );
+      if (!isMember) return;
 
-    const message = {
-      id: makeId(),
-      from_user: socket.userId,
-      to_user: null,
-      group_id: groupId,
-      text,
-      timestamp: Date.now(),
-      delivered: 1,
-      read: 0,
-    };
+      const message = {
+        id: makeId(),
+        from_user: socket.userId,
+        to_user: null,
+        group_id: groupId,
+        text,
+        timestamp: Date.now(),
+        delivered: 1,
+        read: 0,
+      };
 
-    db.prepare(
-      `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
-       VALUES (?, ?, NULL, ?, ?, ?, 1, 0)`
-    ).run(message.id, message.from_user, message.group_id, message.text, message.timestamp);
+      await db.run(
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
+         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0)`,
+        [message.id, message.from_user, message.group_id, message.text, message.timestamp]
+      );
 
-    const members = db
-      .prepare('SELECT user_id FROM group_members WHERE group_id = ?')
-      .all(groupId)
-      .map((m) => m.user_id);
+      const members = (await db.all('SELECT user_id FROM group_members WHERE group_id = $1', [groupId])).map(
+        (m) => m.user_id
+      );
 
-    members
-      .filter((uid) => uid !== socket.userId)
-      .forEach((uid) => {
-        const sockId = onlineUsers.get(uid);
-        if (sockId) io.to(sockId).emit('receive_group_message', message);
-      });
+      members
+        .filter((uid) => uid !== socket.userId)
+        .forEach((uid) => {
+          const sockId = onlineUsers.get(uid);
+          if (sockId) io.to(sockId).emit('receive_group_message', message);
+        });
 
-    socket.emit('group_message_sent', message);
+      socket.emit('group_message_sent', message);
+    } catch (err) {
+      console.error('send_group_message error:', err);
+    }
   });
 
   // ---- typing indicators ----
@@ -284,12 +306,14 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 
-dbInit().then((initializedDb) => {
-  db = initializedDb;
-  server.listen(PORT, () => {
-    console.log(`IndiChat server running at http://localhost:${PORT}`);
+dbInit()
+  .then((initializedDb) => {
+    db = initializedDb;
+    server.listen(PORT, () => {
+      console.log(`IndiChat server running at http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
   });
-}).catch((err) => {
-  console.error('Failed to initialize database:', err);
-  process.exit(1);
-});

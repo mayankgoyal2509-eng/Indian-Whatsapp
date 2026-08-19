@@ -1,7 +1,7 @@
 {
   "name": "indian-whatsapp-clone",
-  "version": "2.1.0",
-  "description": "IndiChat - WhatsApp-style real-time chat app with auth, groups, and read receipts",
+  "version": "3.0.0",
+  "description": "IndiChat - WhatsApp-style real-time chat app with auth, groups, read receipts, hosted database",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,7 +9,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
-    "sql.js": "^1.11.0",
+    "pg": "^8.12.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2"
   }
