@@ -195,6 +195,11 @@ function logout() {
   location.reload();
 }
 
+document.getElementById('logout-btn').addEventListener('click', () => {
+  if (socket) socket.disconnect();
+  logout();
+});
+
 function renderContactList() {
   contactListEl.innerHTML = '';
 

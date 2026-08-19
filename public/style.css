@@ -369,3 +369,8 @@ body {
 }
 .btn-primary { background: #25D366; color: #fff; }
 .btn-secondary { background: #eee; color: #333; }
+
+.sidebar-header-actions {
+  display: flex;
+  gap: 6px;
+}
