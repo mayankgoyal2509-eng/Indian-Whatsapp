@@ -46,6 +46,7 @@
         <div class="sidebar-header">
           <div class="my-name" id="my-name"></div>
           <div class="sidebar-header-actions">
+            <button id="add-contact-btn" class="new-group-btn" title="Add contact">+ Contact</button>
             <button id="new-group-btn" class="new-group-btn" title="New group">+ Group</button>
             <button id="logout-btn" class="new-group-btn" title="Log out">Logout</button>
           </div>
@@ -76,6 +77,19 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- ADD CONTACT MODAL -->
+  <div id="contact-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Add contact</h3>
+      <input type="tel" id="contact-phone-input" placeholder="Their phone number" />
+      <p id="contact-add-error" class="auth-error hidden"></p>
+      <div class="modal-actions">
+        <button id="contact-cancel-btn" class="btn-secondary">Cancel</button>
+        <button id="contact-add-btn" class="btn-primary">Add</button>
+      </div>
     </div>
   </div>
 

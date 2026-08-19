@@ -176,7 +176,7 @@ function startApp() {
 
 // ---------- Contacts + Groups ----------
 async function loadContacts() {
-  const res = await fetch('/api/users', { headers: authHeaders() });
+  const res = await fetch('/api/contacts', { headers: authHeaders() });
   if (res.status === 401) return logout();
   contacts = await res.json();
   renderContactList();
@@ -285,7 +285,7 @@ function renderMessage(msg) {
   const isOut = msg.from_user === me.id;
   const div = document.createElement('div');
   div.className = 'msg ' + (isOut ? 'out' : 'in');
-  const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const time = new Date(Number(msg.timestamp)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   let ticksHtml = '';
   if (isOut && activeChat.type === 'user') {
@@ -323,6 +323,42 @@ messageInput.addEventListener('input', () => {
   socket.emit('typing', { to: activeChat.id });
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => socket.emit('stop_typing', { to: activeChat.id }), 1500);
+});
+
+// ---------- Add contact modal ----------
+const contactModal = document.getElementById('contact-modal');
+const contactPhoneInput = document.getElementById('contact-phone-input');
+const contactAddError = document.getElementById('contact-add-error');
+
+document.getElementById('add-contact-btn').addEventListener('click', () => {
+  contactPhoneInput.value = '';
+  contactAddError.classList.add('hidden');
+  contactModal.classList.remove('hidden');
+});
+
+document.getElementById('contact-cancel-btn').addEventListener('click', () => {
+  contactModal.classList.add('hidden');
+});
+
+document.getElementById('contact-add-btn').addEventListener('click', async () => {
+  const phone = contactPhoneInput.value.trim();
+  if (!phone) return;
+
+  const res = await fetch('/api/contacts', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ phone }),
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    contactAddError.textContent = data.error || 'Could not add contact';
+    contactAddError.classList.remove('hidden');
+    return;
+  }
+
+  contactModal.classList.add('hidden');
+  loadContacts();
 });
 
 // ---------- New group modal ----------
