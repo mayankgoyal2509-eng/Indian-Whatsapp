@@ -296,7 +296,22 @@ function renderMessage(msg) {
     ticksHtml = `<span class="msg-ticks ${cls}">${ticks}</span>`;
   }
 
-  div.innerHTML = `${escapeHtml(msg.text)}<span class="msg-time">${time}${ticksHtml}</span>`;
+  let mediaHtml = '';
+  if (msg.media_url) {
+    if (msg.media_type === 'image') {
+      mediaHtml = `<img class="msg-media-image" src="${msg.media_url}" onclick="window.open('${msg.media_url}', '_blank')" />`;
+    } else if (msg.media_type === 'audio') {
+      mediaHtml = `<audio class="msg-media-audio" controls src="${msg.media_url}"></audio>`;
+    } else if (msg.media_type === 'video') {
+      mediaHtml = `<video class="msg-media-image" controls src="${msg.media_url}"></video>`;
+    } else {
+      mediaHtml = `<a class="msg-media-file" href="${msg.media_url}" target="_blank">📎 Download file</a>`;
+    }
+  }
+
+  const textHtml = msg.text ? escapeHtml(msg.text) : '';
+
+  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${time}${ticksHtml}</span>`;
   messagesEl.appendChild(div);
 }
 
@@ -304,17 +319,21 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+function sendMessage({ text, mediaUrl, mediaType }) {
+  if (!activeChat) return;
+  if (activeChat.type === 'user') {
+    socket.emit('send_message', { to: activeChat.id, text, mediaUrl, mediaType });
+    socket.emit('stop_typing', { to: activeChat.id });
+  } else {
+    socket.emit('send_group_message', { groupId: activeChat.id, text, mediaUrl, mediaType });
+  }
+}
+
 messageForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = messageInput.value.trim();
   if (!text || !activeChat) return;
-
-  if (activeChat.type === 'user') {
-    socket.emit('send_message', { to: activeChat.id, text });
-    socket.emit('stop_typing', { to: activeChat.id });
-  } else {
-    socket.emit('send_group_message', { groupId: activeChat.id, text });
-  }
+  sendMessage({ text });
   messageInput.value = '';
 });
 
@@ -323,6 +342,90 @@ messageInput.addEventListener('input', () => {
   socket.emit('typing', { to: activeChat.id });
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => socket.emit('stop_typing', { to: activeChat.id }), 1500);
+});
+
+// ---------- File / media upload ----------
+const uploadPreview = document.getElementById('upload-preview');
+const uploadPreviewText = document.getElementById('upload-preview-text');
+const fileInput = document.getElementById('file-input');
+
+document.getElementById('attach-btn').addEventListener('click', () => {
+  if (!activeChat) return alert('Select a chat first');
+  fileInput.click();
+});
+
+document.getElementById('upload-cancel-btn').addEventListener('click', () => {
+  uploadPreview.classList.add('hidden');
+});
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  fileInput.value = '';
+  if (file) await uploadAndSend(file);
+});
+
+async function uploadAndSend(fileOrBlob, filename) {
+  if (!activeChat) return;
+  uploadPreview.classList.remove('hidden');
+  uploadPreviewText.textContent = `Uploading ${filename || fileOrBlob.name || 'file'}…`;
+
+  const formData = new FormData();
+  formData.append('file', fileOrBlob, filename || fileOrBlob.name || 'upload');
+
+  try {
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const data = await res.json();
+    uploadPreview.classList.add('hidden');
+
+    if (!res.ok) {
+      alert(data.error || 'Upload failed');
+      return;
+    }
+    sendMessage({ text: '', mediaUrl: data.url, mediaType: data.mediaType });
+  } catch (err) {
+    uploadPreview.classList.add('hidden');
+    alert('Upload failed. Check your connection.');
+  }
+}
+
+// ---------- Voice recording ----------
+let mediaRecorder = null;
+let recordedChunks = [];
+const micBtn = document.getElementById('mic-btn');
+
+micBtn.addEventListener('click', async () => {
+  if (!activeChat) return alert('Select a chat first');
+
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      micBtn.classList.remove('recording');
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+      await uploadAndSend(blob, `voice-note-${Date.now()}.webm`);
+    };
+
+    mediaRecorder.start();
+    micBtn.classList.add('recording');
+  } catch (err) {
+    alert('Could not access microphone. Check browser permissions.');
+  }
 });
 
 // ---------- Add contact modal ----------

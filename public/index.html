@@ -70,7 +70,15 @@
 
           <div class="typing-indicator hidden" id="typing-indicator">typing…</div>
 
+          <div id="upload-preview" class="upload-preview hidden">
+            <span id="upload-preview-text">Uploading…</span>
+            <button type="button" id="upload-cancel-btn">✕</button>
+          </div>
+
           <form id="message-form" class="message-form">
+            <input type="file" id="file-input" accept="image/*,audio/*,video/*,application/pdf" hidden />
+            <button type="button" id="attach-btn" class="icon-btn" title="Attach file">📎</button>
+            <button type="button" id="mic-btn" class="icon-btn" title="Record voice note">🎤</button>
             <input type="text" id="message-input" placeholder="Type a message" autocomplete="off" />
             <button type="submit">Send</button>
           </form>

@@ -38,6 +38,9 @@ const SCHEMA = `
     read INTEGER NOT NULL DEFAULT 0
   );
 
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_url TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type TEXT;
+
   CREATE TABLE IF NOT EXISTS contacts (
     owner_id TEXT NOT NULL,
     contact_id TEXT NOT NULL,

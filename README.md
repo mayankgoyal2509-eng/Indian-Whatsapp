@@ -13,12 +13,23 @@ password auth, WhatsApp-style frontend.
 - Blue-tick read receipts for 1-to-1 chats
 - Online/offline status + typing indicator
 - Logout button
+- Photo, file, and voice note sharing (📎 attach / 🎤 record buttons),
+  stored permanently via Cloudinary
 
 ## Coming in later layers
-- Media / voice message sharing
 - Push notifications
 - End-to-end encryption
 - Voice/video calls (WebRTC)
+- Chat folders
+
+## Getting free media storage (Cloudinary)
+1. Go to cloudinary.com, sign up free.
+2. On your dashboard, find the **"API Environment variable"** box — it
+   shows something like `CLOUDINARY_URL=cloudinary://123456:AbCdEf@your-cloud-name`
+3. Copy the whole thing (or just the part after the `=`).
+4. Set it as an environment variable named `CLOUDINARY_URL` — same way you
+   set `DATABASE_URL` and `JWT_SECRET` (locally via `set`/`export`, or on
+   Render under Environment Variables).
 
 ## Local setup
 

@@ -4,7 +4,24 @@ const { Server } = require('socket.io');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2; // auto-configures from CLOUDINARY_URL env var
 const dbInit = require('./db').init;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+});
+
+function uploadBufferToCloudinary(buffer) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream({ resource_type: 'auto' }, (err, result) => {
+      if (err) reject(err);
+      else resolve(result);
+    });
+    stream.end(buffer);
+  });
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-this-in-production';
 
@@ -142,6 +159,34 @@ app.get('/api/contacts', authenticate, h(async (req, res) => {
   res.json(contacts);
 }));
 
+// ---------- media upload ----------
+
+app.post(
+  '/api/upload',
+  authenticate,
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  h(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    if (!process.env.CLOUDINARY_URL) {
+      return res.status(500).json({ error: 'Media storage is not configured (CLOUDINARY_URL missing)' });
+    }
+
+    const mimetype = req.file.mimetype || '';
+    let mediaType = 'file';
+    if (mimetype.startsWith('image/')) mediaType = 'image';
+    else if (mimetype.startsWith('audio/')) mediaType = 'audio';
+    else if (mimetype.startsWith('video/')) mediaType = 'video';
+
+    const result = await uploadBufferToCloudinary(req.file.buffer);
+    res.json({ url: result.secure_url, mediaType });
+  })
+);
+
 // ---------- direct messages ----------
 
 app.get('/api/messages/:otherId', authenticate, h(async (req, res) => {
@@ -254,17 +299,19 @@ io.on('connection', (socket) => {
   io.emit('presence_update', Array.from(onlineUsers.keys()));
 
   // ---- direct messages ----
-  socket.on('send_message', async ({ to, text }) => {
-    if (!to || !text) return;
+  socket.on('send_message', async ({ to, text, mediaUrl, mediaType }) => {
+    if (!to || (!text && !mediaUrl)) return;
     const message = {
       id: makeId(),
       from_user: socket.userId,
       to_user: to,
       group_id: null,
-      text,
+      text: text || '',
       timestamp: Date.now(),
       delivered: 0,
       read: 0,
+      media_url: mediaUrl || null,
+      media_type: mediaType || null,
     };
 
     const targetSocketId = onlineUsers.get(to);
@@ -275,9 +322,18 @@ io.on('connection', (socket) => {
 
     try {
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0)`,
-        [message.id, message.from_user, message.to_user, message.text, message.timestamp, message.delivered]
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, $8)`,
+        [
+          message.id,
+          message.from_user,
+          message.to_user,
+          message.text,
+          message.timestamp,
+          message.delivered,
+          message.media_url,
+          message.media_type,
+        ]
       );
       socket.emit('message_sent', message);
     } catch (err) {
@@ -286,8 +342,8 @@ io.on('connection', (socket) => {
   });
 
   // ---- group messages ----
-  socket.on('send_group_message', async ({ groupId, text }) => {
-    if (!groupId || !text) return;
+  socket.on('send_group_message', async ({ groupId, text, mediaUrl, mediaType }) => {
+    if (!groupId || (!text && !mediaUrl)) return;
     try {
       const isMember = await db.get(
         'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
@@ -300,16 +356,26 @@ io.on('connection', (socket) => {
         from_user: socket.userId,
         to_user: null,
         group_id: groupId,
-        text,
+        text: text || '',
         timestamp: Date.now(),
         delivered: 1,
         read: 0,
+        media_url: mediaUrl || null,
+        media_type: mediaType || null,
       };
 
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read)
-         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0)`,
-        [message.id, message.from_user, message.group_id, message.text, message.timestamp]
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type)
+         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0, $6, $7)`,
+        [
+          message.id,
+          message.from_user,
+          message.group_id,
+          message.text,
+          message.timestamp,
+          message.media_url,
+          message.media_type,
+        ]
       );
 
       const members = (await db.all('SELECT user_id FROM group_members WHERE group_id = $1', [groupId])).map(

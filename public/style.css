@@ -374,3 +374,70 @@ body {
   display: flex;
   gap: 6px;
 }
+
+/* ---------- MEDIA / VOICE ATTACHMENTS ---------- */
+.icon-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 50%;
+  line-height: 1;
+}
+.icon-btn:hover { background: rgba(0,0,0,0.06); }
+.icon-btn.recording {
+  background: #ff4444;
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.upload-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #fff8dc;
+  font-size: 13px;
+  color: #555;
+  border-top: 1px solid #eee;
+}
+.upload-preview button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: #999;
+}
+
+.msg-media-image {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
+  display: block;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
+.msg-media-audio {
+  display: block;
+  margin-bottom: 4px;
+  max-width: 240px;
+}
+
+.msg-media-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.04);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  text-decoration: none;
+  color: #075E54;
+  font-size: 13px;
+  max-width: 220px;
+}
