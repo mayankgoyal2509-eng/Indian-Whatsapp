@@ -14,6 +14,8 @@ const SCHEMA = `
     created_at BIGINT NOT NULL
   );
 
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -40,6 +42,16 @@ const SCHEMA = `
 
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_url TEXT;
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted INTEGER NOT NULL DEFAULT 0;
+
+  -- chat_key is the other user's id for direct chats, or 'group:<id>' for groups.
+  -- Lets each person clear a chat for themselves without affecting the other side.
+  CREATE TABLE IF NOT EXISTS chat_clears (
+    owner_id TEXT NOT NULL,
+    chat_key TEXT NOT NULL,
+    cleared_at BIGINT NOT NULL,
+    PRIMARY KEY (owner_id, chat_key)
+  );
 
   CREATE TABLE IF NOT EXISTS contacts (
     owner_id TEXT NOT NULL,

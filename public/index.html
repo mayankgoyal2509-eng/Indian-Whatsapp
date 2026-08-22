@@ -44,11 +44,13 @@
       <!-- Sidebar -->
       <div class="sidebar">
         <div class="sidebar-header">
-          <div class="my-name" id="my-name"></div>
+          <div class="my-profile" id="my-profile" title="View profile">
+            <div id="my-avatar" class="header-avatar"></div>
+            <div class="my-name" id="my-name"></div>
+          </div>
           <div class="sidebar-header-actions">
             <button id="add-contact-btn" class="new-group-btn" title="Add contact">+ Contact</button>
             <button id="new-group-btn" class="new-group-btn" title="New group">+ Group</button>
-            <button id="logout-btn" class="new-group-btn" title="Log out">Logout</button>
           </div>
         </div>
         <div class="contact-list" id="contact-list"></div>
@@ -62,8 +64,13 @@
 
         <div id="chat-active" class="chat-active hidden">
           <div class="chat-header">
-            <div class="chat-contact-name" id="chat-contact-name"></div>
-            <div class="chat-contact-status" id="chat-contact-status"></div>
+            <button id="back-btn" class="back-btn" title="Back">←</button>
+            <div id="chat-header-avatar"></div>
+            <div class="chat-header-info">
+              <div class="chat-contact-name" id="chat-contact-name"></div>
+              <div class="chat-contact-status" id="chat-contact-status"></div>
+            </div>
+            <button id="delete-chat-btn" class="icon-btn header-icon-btn" title="Delete chat">🗑</button>
           </div>
 
           <div class="messages" id="messages"></div>
@@ -71,12 +78,15 @@
           <div class="typing-indicator hidden" id="typing-indicator">typing…</div>
 
           <div id="upload-preview" class="upload-preview hidden">
-            <span id="upload-preview-text">Uploading…</span>
-            <button type="button" id="upload-cancel-btn">✕</button>
+            <div id="upload-preview-content" class="upload-preview-content"></div>
+            <div class="upload-preview-actions">
+              <button type="button" id="upload-cancel-btn" class="btn-secondary">Cancel</button>
+              <button type="button" id="upload-send-btn" class="btn-primary">Send</button>
+            </div>
           </div>
 
           <form id="message-form" class="message-form">
-            <input type="file" id="file-input" accept="image/*,audio/*,video/*,application/pdf" hidden />
+            <input type="file" id="file-input" hidden />
             <button type="button" id="attach-btn" class="icon-btn" title="Attach file">📎</button>
             <button type="button" id="mic-btn" class="icon-btn" title="Record voice note">🎤</button>
             <input type="text" id="message-input" placeholder="Type a message" autocomplete="off" />
@@ -85,6 +95,47 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- PROFILE MODAL -->
+  <div id="profile-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Profile</h3>
+
+      <div class="profile-avatar-section">
+        <div id="profile-avatar-preview"></div>
+        <input type="file" id="avatar-file-input" accept="image/*" hidden />
+        <button type="button" id="change-avatar-btn" class="btn-secondary">Change photo</button>
+      </div>
+
+      <label class="modal-label">Name</label>
+      <input type="text" id="profile-name-input" />
+      <label class="modal-label">Phone number</label>
+      <input type="tel" id="profile-phone-input" />
+      <p id="profile-error" class="auth-error hidden"></p>
+      <p id="profile-success" class="profile-success hidden"></p>
+      <div class="modal-actions">
+        <button id="profile-save-btn" class="btn-primary">Save changes</button>
+      </div>
+
+      <hr class="modal-divider" />
+
+      <h3>Change password</h3>
+      <input type="password" id="profile-current-password" placeholder="Current password" />
+      <input type="password" id="profile-new-password" placeholder="New password (min 6 characters)" />
+      <p id="password-error" class="auth-error hidden"></p>
+      <p id="password-success" class="profile-success hidden"></p>
+      <div class="modal-actions">
+        <button id="password-change-btn" class="btn-primary">Change password</button>
+      </div>
+
+      <hr class="modal-divider" />
+
+      <div class="modal-actions">
+        <button id="profile-close-btn" class="btn-secondary">Close</button>
+        <button id="logout-btn" class="btn-secondary">Log out</button>
+      </div>
     </div>
   </div>
 

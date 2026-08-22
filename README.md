@@ -12,9 +12,21 @@ password auth, WhatsApp-style frontend.
 - Group chats
 - Blue-tick read receipts for 1-to-1 chats
 - Online/offline status + typing indicator
-- Logout button
 - Photo, file, and voice note sharing (📎 attach / 🎤 record buttons),
-  stored permanently via Cloudinary
+  stored permanently via Cloudinary, no file size limit
+- **Confirm-before-send** — attaching a photo or recording a voice note
+  shows a preview (with playback for audio) before it actually sends
+- **Delete a message** — removes it for everyone (shows "This message was
+  deleted"); only the sender can delete their own messages
+- **Delete a chat** — clears the conversation on your side only; the other
+  person's copy is untouched, and the chat reappears if they message again
+- **Profile settings** — click your name to edit your name/phone number,
+  upload a profile photo, or change your password
+- **Clickable links** — URLs in messages open in one click instead of
+  needing to be manually copied
+- **Proper mobile layout** — on narrow screens, the contact list and chat
+  view are separate full-width screens with a back button, instead of both
+  being squeezed side by side
 
 ## Coming in later layers
 - Push notifications

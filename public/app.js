@@ -6,6 +6,7 @@ let onlineUserIds = [];
 let contacts = [];
 let groups = [];
 let typingTimeout = null;
+let pendingUpload = null; // { fileOrBlob, filename, objectUrl }
 
 const loginScreen = document.getElementById('login-screen');
 const appScreen = document.getElementById('app-screen');
@@ -13,7 +14,10 @@ const loginForm = document.getElementById('login-form');
 const registerForm = document.getElementById('register-form');
 const authError = document.getElementById('auth-error');
 const myNameEl = document.getElementById('my-name');
+const myProfileEl = document.getElementById('my-profile');
+const myAvatarEl = document.getElementById('my-avatar');
 const contactListEl = document.getElementById('contact-list');
+const appContainerEl = document.querySelector('.app-container');
 const chatEmpty = document.getElementById('chat-empty');
 const chatActive = document.getElementById('chat-active');
 const chatContactName = document.getElementById('chat-contact-name');
@@ -102,11 +106,40 @@ function authHeaders() {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
+// Renders an avatar as an <img> if the user has a photo, or a circle with
+// their initial otherwise. sizeClass controls the CSS sizing (e.g.
+// 'contact-avatar', 'header-avatar', 'profile-avatar-preview-circle').
+function avatarHtml(user, sizeClass) {
+  if (user && user.avatar_url) {
+    return `<img class="${sizeClass}" src="${user.avatar_url}" alt="" />`;
+  }
+  const initial = user && user.name ? user.name.charAt(0).toUpperCase() : '?';
+  return `<div class="${sizeClass}">${initial}</div>`;
+}
+
+// Turns http(s)/www links in already-HTML-escaped text into clickable,
+// one-click-to-open anchors, so links never need to be manually copied.
+function linkify(escapedText) {
+  const urlRegex = /((https?:\/\/|www\.)[^\s<]+)/gi;
+  return escapedText.replace(urlRegex, (match) => {
+    const trailingMatch = match.match(/[),.!?;:'"]+$/);
+    let urlPart = match;
+    let trailing = '';
+    if (trailingMatch) {
+      trailing = trailingMatch[0];
+      urlPart = match.slice(0, -trailing.length);
+    }
+    const href = /^https?:\/\//i.test(urlPart) ? urlPart : `https://${urlPart}`;
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="msg-link">${urlPart}</a>${trailing}`;
+  });
+}
+
 // ---------- App start ----------
 function startApp() {
   loginScreen.classList.add('hidden');
   appScreen.classList.remove('hidden');
   myNameEl.textContent = me.name;
+  myAvatarEl.innerHTML = avatarHtml(me, 'header-avatar');
 
   socket = io({ auth: { token } });
 
@@ -166,6 +199,14 @@ function startApp() {
     }
   });
 
+  socket.on('message_deleted', ({ id, otherId, groupId }) => {
+    const inThisChat =
+      activeChat &&
+      ((activeChat.type === 'user' && otherId === activeChat.id) ||
+        (activeChat.type === 'group' && groupId === activeChat.id));
+    if (inThisChat) markMessageDeleted(id);
+  });
+
   loadContacts();
   loadGroups();
   setInterval(() => {
@@ -222,7 +263,7 @@ function renderContactList() {
     const div = document.createElement('div');
     div.className = 'contact' + (activeChat && activeChat.type === 'user' && activeChat.id === c.id ? ' active' : '');
     div.innerHTML = `
-      <div class="contact-avatar">${c.name.charAt(0).toUpperCase()}</div>
+      ${avatarHtml(c, 'contact-avatar')}
       <div class="contact-info">
         <div class="contact-name">${escapeHtml(c.name)}</div>
         <div class="contact-sub">${isOnline ? 'Online' : 'Offline'}</div>
@@ -239,6 +280,7 @@ async function openUserChat(contact) {
   activeChat = { type: 'user', id: contact.id, name: contact.name };
   renderContactList();
   showChatPanel(contact.name);
+  document.getElementById('chat-header-avatar').innerHTML = avatarHtml(contact, 'header-avatar');
   updateActiveStatus();
 
   const res = await fetch(`/api/messages/${contact.id}`, { headers: authHeaders() });
@@ -258,6 +300,7 @@ async function openGroupChat(group) {
   activeChat = { type: 'group', id: group.id, name: group.name };
   renderContactList();
   showChatPanel(group.name, true);
+  document.getElementById('chat-header-avatar').innerHTML = avatarHtml({ name: group.name }, 'header-avatar');
 
   const res = await fetch(`/api/groups/${group.id}/messages`, { headers: authHeaders() });
   const history = await res.json();
@@ -267,11 +310,14 @@ async function openGroupChat(group) {
 }
 
 function showChatPanel(name, isGroup) {
+  clearPendingUpload();
+  uploadPreview.classList.add('hidden');
   chatEmpty.classList.add('hidden');
   chatActive.classList.remove('hidden');
   chatContactName.textContent = name;
   chatContactStatus.textContent = isGroup ? 'group chat' : '';
   typingIndicator.classList.add('hidden');
+  appContainerEl.classList.add('chat-open'); // mobile: switch to chat view
 }
 
 function updateActiveStatus() {
@@ -280,11 +326,48 @@ function updateActiveStatus() {
   chatContactStatus.textContent = isOnline ? 'online' : 'offline';
 }
 
+// ---------- Mobile back navigation ----------
+document.getElementById('back-btn').addEventListener('click', () => {
+  appContainerEl.classList.remove('chat-open');
+});
+
+// ---------- Delete chat (clears history for you only) ----------
+document.getElementById('delete-chat-btn').addEventListener('click', async () => {
+  if (!activeChat) return;
+  const otherSide = activeChat.type === 'group' ? 'Other members' : 'The other person';
+  const ok = confirm(
+    `Delete this chat? This clears the conversation for you only — ${otherSide} will still see the messages on their side.`
+  );
+  if (!ok) return;
+
+  const chatKey = activeChat.type === 'group' ? `group:${activeChat.id}` : activeChat.id;
+  await fetch(`/api/chats/${encodeURIComponent(chatKey)}/clear`, { method: 'POST', headers: authHeaders() });
+
+  messagesEl.innerHTML = '';
+  chatActive.classList.add('hidden');
+  chatEmpty.classList.remove('hidden');
+  activeChat = null;
+  appContainerEl.classList.remove('chat-open');
+  loadContacts();
+  loadGroups();
+});
+
 // ---------- Messages ----------
 function renderMessage(msg) {
   const isOut = msg.from_user === me.id;
   const div = document.createElement('div');
-  div.className = 'msg ' + (isOut ? 'out' : 'in');
+  div.dataset.id = msg.id;
+  div.className = 'msg ' + (isOut ? 'out' : 'in') + (msg.deleted ? ' deleted' : '');
+  messagesEl.appendChild(div);
+  paintMessage(div, msg, isOut);
+}
+
+function paintMessage(div, msg, isOut) {
+  if (msg.deleted) {
+    div.innerHTML = `<span class="deleted-text">This message was deleted</span>`;
+    return;
+  }
+
   const time = new Date(Number(msg.timestamp)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   let ticksHtml = '';
@@ -309,10 +392,33 @@ function renderMessage(msg) {
     }
   }
 
-  const textHtml = msg.text ? escapeHtml(msg.text) : '';
+  const textHtml = msg.text ? linkify(escapeHtml(msg.text)) : '';
+  const deleteBtnHtml = isOut ? `<button type="button" class="msg-delete-btn" title="Delete message">🗑</button>` : '';
 
-  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${time}${ticksHtml}</span>`;
-  messagesEl.appendChild(div);
+  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${time}${ticksHtml}${deleteBtnHtml}</span>`;
+
+  if (isOut) {
+    div.querySelector('.msg-delete-btn').addEventListener('click', () => deleteMessage(msg.id));
+  }
+}
+
+function markMessageDeleted(id) {
+  const div = messagesEl.querySelector(`[data-id="${id}"]`);
+  if (div) {
+    div.classList.add('deleted');
+    div.innerHTML = `<span class="deleted-text">This message was deleted</span>`;
+  }
+}
+
+async function deleteMessage(id) {
+  if (!confirm('Delete this message? This removes it for everyone.')) return;
+  const res = await fetch(`/api/messages/${id}`, { method: 'DELETE', headers: authHeaders() });
+  if (res.ok) {
+    markMessageDeleted(id);
+  } else {
+    const data = await res.json().catch(() => ({}));
+    alert(data.error || 'Could not delete message');
+  }
 }
 
 function scrollToBottom() {
@@ -344,9 +450,11 @@ messageInput.addEventListener('input', () => {
   typingTimeout = setTimeout(() => socket.emit('stop_typing', { to: activeChat.id }), 1500);
 });
 
-// ---------- File / media upload ----------
+// ---------- File / media upload (preview + confirm before sending) ----------
 const uploadPreview = document.getElementById('upload-preview');
-const uploadPreviewText = document.getElementById('upload-preview-text');
+const uploadPreviewContent = document.getElementById('upload-preview-content');
+const uploadCancelBtn = document.getElementById('upload-cancel-btn');
+const uploadSendBtn = document.getElementById('upload-send-btn');
 const fileInput = document.getElementById('file-input');
 
 document.getElementById('attach-btn').addEventListener('click', () => {
@@ -354,23 +462,64 @@ document.getElementById('attach-btn').addEventListener('click', () => {
   fileInput.click();
 });
 
-document.getElementById('upload-cancel-btn').addEventListener('click', () => {
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  fileInput.value = '';
+  if (file) showUploadPreview(file, file.name);
+});
+
+function showUploadPreview(fileOrBlob, filename) {
+  clearPendingUpload();
+
+  const objectUrl = URL.createObjectURL(fileOrBlob);
+  const mimetype = fileOrBlob.type || '';
+  pendingUpload = { fileOrBlob, filename, objectUrl };
+
+  if (mimetype.startsWith('image/')) {
+    uploadPreviewContent.innerHTML = `<img src="${objectUrl}" class="upload-preview-image" />`;
+  } else if (mimetype.startsWith('audio/')) {
+    uploadPreviewContent.innerHTML = `<audio controls src="${objectUrl}"></audio><div class="upload-preview-filename">${escapeHtml(filename)}</div>`;
+  } else if (mimetype.startsWith('video/')) {
+    uploadPreviewContent.innerHTML = `<video controls src="${objectUrl}" class="upload-preview-image"></video>`;
+  } else {
+    uploadPreviewContent.innerHTML = `<div class="upload-preview-filename">📎 ${escapeHtml(filename)}</div>`;
+  }
+
+  uploadCancelBtn.classList.remove('hidden');
+  uploadSendBtn.classList.remove('hidden');
+  uploadPreview.classList.remove('hidden');
+}
+
+function clearPendingUpload() {
+  if (pendingUpload) {
+    URL.revokeObjectURL(pendingUpload.objectUrl);
+    pendingUpload = null;
+  }
+  uploadPreviewContent.innerHTML = '';
+}
+
+uploadCancelBtn.addEventListener('click', () => {
+  clearPendingUpload();
   uploadPreview.classList.add('hidden');
 });
 
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files[0];
-  fileInput.value = '';
-  if (file) await uploadAndSend(file);
+uploadSendBtn.addEventListener('click', async () => {
+  if (!pendingUpload) return;
+  const { fileOrBlob, filename } = pendingUpload;
+  pendingUpload = null; // keep object URL alive until upload finishes rendering isn't needed anymore
+  await uploadAndSend(fileOrBlob, filename);
 });
 
 async function uploadAndSend(fileOrBlob, filename) {
   if (!activeChat) return;
+
+  uploadPreviewContent.innerHTML = `<span>Uploading ${escapeHtml(filename || 'file')}…</span>`;
+  uploadCancelBtn.classList.add('hidden');
+  uploadSendBtn.classList.add('hidden');
   uploadPreview.classList.remove('hidden');
-  uploadPreviewText.textContent = `Uploading ${filename || fileOrBlob.name || 'file'}…`;
 
   const formData = new FormData();
-  formData.append('file', fileOrBlob, filename || fileOrBlob.name || 'upload');
+  formData.append('file', fileOrBlob, filename || 'upload');
 
   try {
     const res = await fetch('/api/upload', {
@@ -388,11 +537,11 @@ async function uploadAndSend(fileOrBlob, filename) {
     sendMessage({ text: '', mediaUrl: data.url, mediaType: data.mediaType });
   } catch (err) {
     uploadPreview.classList.add('hidden');
-    alert('Upload failed. Check your connection.');
+    alert('Upload failed — connection was interrupted, possibly because the file is large. Try a smaller file or check your internet connection.');
   }
 }
 
-// ---------- Voice recording ----------
+// ---------- Voice recording (preview + confirm before sending) ----------
 let mediaRecorder = null;
 let recordedChunks = [];
 const micBtn = document.getElementById('mic-btn');
@@ -414,11 +563,11 @@ micBtn.addEventListener('click', async () => {
       if (e.data.size > 0) recordedChunks.push(e.data);
     };
 
-    mediaRecorder.onstop = async () => {
+    mediaRecorder.onstop = () => {
       micBtn.classList.remove('recording');
       stream.getTracks().forEach((t) => t.stop());
       const blob = new Blob(recordedChunks, { type: 'audio/webm' });
-      await uploadAndSend(blob, `voice-note-${Date.now()}.webm`);
+      showUploadPreview(blob, `voice-note-${Date.now()}.webm`);
     };
 
     mediaRecorder.start();
@@ -502,6 +651,126 @@ document.getElementById('group-create-btn').addEventListener('click', async () =
     groupModal.classList.add('hidden');
     loadGroups();
   }
+});
+
+// ---------- Profile modal ----------
+const profileModal = document.getElementById('profile-modal');
+const profileNameInput = document.getElementById('profile-name-input');
+const profilePhoneInput = document.getElementById('profile-phone-input');
+const profileError = document.getElementById('profile-error');
+const profileSuccess = document.getElementById('profile-success');
+const profileCurrentPassword = document.getElementById('profile-current-password');
+const profileNewPassword = document.getElementById('profile-new-password');
+const passwordError = document.getElementById('password-error');
+const passwordSuccess = document.getElementById('password-success');
+
+myProfileEl.addEventListener('click', () => {
+  profileNameInput.value = me.name;
+  profilePhoneInput.value = me.phone;
+  profileCurrentPassword.value = '';
+  profileNewPassword.value = '';
+  document.getElementById('profile-avatar-preview').innerHTML = avatarHtml(me, 'profile-avatar-preview-circle');
+  [profileError, profileSuccess, passwordError, passwordSuccess].forEach((el) => el.classList.add('hidden'));
+  profileModal.classList.remove('hidden');
+});
+
+document.getElementById('change-avatar-btn').addEventListener('click', () => {
+  document.getElementById('avatar-file-input').click();
+});
+
+document.getElementById('avatar-file-input').addEventListener('change', async () => {
+  const avatarFileInput = document.getElementById('avatar-file-input');
+  const file = avatarFileInput.files[0];
+  avatarFileInput.value = '';
+  if (!file) return;
+
+  profileError.classList.add('hidden');
+  profileSuccess.classList.add('hidden');
+
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+
+  try {
+    const res = await fetch('/api/profile/avatar', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      profileError.textContent = data.error || 'Could not upload photo';
+      profileError.classList.remove('hidden');
+      return;
+    }
+
+    me = { ...me, avatar_url: data.avatar_url };
+    localStorage.setItem('indichat_user', JSON.stringify(me));
+    myAvatarEl.innerHTML = avatarHtml(me, 'header-avatar');
+    document.getElementById('profile-avatar-preview').innerHTML = avatarHtml(me, 'profile-avatar-preview-circle');
+    profileSuccess.textContent = 'Photo updated!';
+    profileSuccess.classList.remove('hidden');
+  } catch (err) {
+    profileError.textContent = 'Upload failed. Check your connection and try again.';
+    profileError.classList.remove('hidden');
+  }
+});
+
+document.getElementById('profile-close-btn').addEventListener('click', () => {
+  profileModal.classList.add('hidden');
+});
+
+document.getElementById('profile-save-btn').addEventListener('click', async () => {
+  const name = profileNameInput.value.trim();
+  const phone = profilePhoneInput.value.trim();
+  profileError.classList.add('hidden');
+  profileSuccess.classList.add('hidden');
+  if (!name || !phone) return;
+
+  const res = await fetch('/api/profile', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({ name, phone }),
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    profileError.textContent = data.error || 'Could not save changes';
+    profileError.classList.remove('hidden');
+    return;
+  }
+
+  me = { ...me, name: data.name, phone: data.phone };
+  localStorage.setItem('indichat_user', JSON.stringify(me));
+  myNameEl.textContent = me.name;
+  profileSuccess.textContent = 'Saved!';
+  profileSuccess.classList.remove('hidden');
+});
+
+document.getElementById('password-change-btn').addEventListener('click', async () => {
+  const currentPassword = profileCurrentPassword.value;
+  const newPassword = profileNewPassword.value;
+  passwordError.classList.add('hidden');
+  passwordSuccess.classList.add('hidden');
+  if (!currentPassword || !newPassword) return;
+
+  const res = await fetch('/api/profile/password', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    passwordError.textContent = data.error || 'Could not change password';
+    passwordError.classList.remove('hidden');
+    return;
+  }
+
+  profileCurrentPassword.value = '';
+  profileNewPassword.value = '';
+  passwordSuccess.textContent = 'Password changed!';
+  passwordSuccess.classList.remove('hidden');
 });
 
 function escapeHtml(str) {

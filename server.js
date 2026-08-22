@@ -2,25 +2,39 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2; // auto-configures from CLOUDINARY_URL env var
 const dbInit = require('./db').init;
 
+// Uploads are streamed to a temp file on disk (not held in server memory),
+// so file size isn't limited by available RAM. The temp file is deleted
+// right after it's forwarded to Cloudinary.
+const TMP_UPLOAD_DIR = path.join(os.tmpdir(), 'indichat-uploads');
+fs.mkdirSync(TMP_UPLOAD_DIR, { recursive: true });
+
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, TMP_UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(file.originalname)}`);
+    },
+  }),
+  // No `limits` set — no file size cap enforced by this server.
+  // Note: Cloudinary's own account plan may still cap very large files,
+  // and extremely large uploads will simply take longer / depend on the
+  // uploader's connection speed.
 });
 
-function uploadBufferToCloudinary(buffer) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream({ resource_type: 'auto' }, (err, result) => {
-      if (err) reject(err);
-      else resolve(result);
-    });
-    stream.end(buffer);
-  });
+// Cloudinary's 'auto' resource type only reliably detects images/video.
+// Anything else (zip, pdf, docs, etc.) needs to be uploaded as 'raw' explicitly.
+function resourceTypeFor(mimetype) {
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('video/') || mimetype.startsWith('audio/')) return 'video';
+  return 'raw';
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-this-in-production';
@@ -41,7 +55,7 @@ function makeId() {
 }
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, phone: u.phone };
+  return { id: u.id, name: u.name, phone: u.phone, avatar_url: u.avatar_url || null };
 }
 
 function signToken(user) {
@@ -118,7 +132,7 @@ app.get('/api/users/search', authenticate, h(async (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: 'Phone number is required' });
 
-  const user = await db.get('SELECT id, name, phone FROM users WHERE phone = $1', [phone]);
+  const user = await db.get('SELECT id, name, phone, avatar_url FROM users WHERE phone = $1', [phone]);
   if (!user) return res.status(404).json({ error: 'No account found with that phone number' });
   if (user.id === req.userId) return res.status(400).json({ error: "That's your own number" });
 
@@ -129,7 +143,7 @@ app.post('/api/contacts', authenticate, h(async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: 'Phone number is required' });
 
-  const target = await db.get('SELECT id, name, phone FROM users WHERE phone = $1', [phone]);
+  const target = await db.get('SELECT id, name, phone, avatar_url FROM users WHERE phone = $1', [phone]);
   if (!target) return res.status(404).json({ error: 'No account found with that phone number' });
   if (target.id === req.userId) return res.status(400).json({ error: "That's your own number" });
 
@@ -143,20 +157,106 @@ app.post('/api/contacts', authenticate, h(async (req, res) => {
 
 // Your chat list: people you've explicitly added, plus anyone you already
 // have a direct message history with (so incoming messages aren't lost).
+// If you've cleared a chat, it drops off this list until a new message arrives.
 app.get('/api/contacts', authenticate, h(async (req, res) => {
   const contacts = await db.all(
-    `SELECT DISTINCT u.id, u.name, u.phone FROM users u
-     WHERE u.id IN (
-       SELECT contact_id FROM contacts WHERE owner_id = $1
-       UNION
-       SELECT from_user FROM messages WHERE to_user = $1
-       UNION
-       SELECT to_user FROM messages WHERE from_user = $1
-     )
-     AND u.id != $1`,
+    `SELECT DISTINCT u.id, u.name, u.phone, u.avatar_url FROM users u
+     WHERE u.id != $1
+     AND (
+       u.id IN (SELECT contact_id FROM contacts WHERE owner_id = $1)
+       OR EXISTS (
+         SELECT 1 FROM messages m
+         WHERE ((m.from_user = u.id AND m.to_user = $1) OR (m.from_user = $1 AND m.to_user = u.id))
+         AND m.timestamp > COALESCE(
+           (SELECT cleared_at FROM chat_clears WHERE owner_id = $1 AND chat_key = u.id), 0
+         )
+       )
+     )`,
     [req.userId]
   );
   res.json(contacts);
+}));
+
+// Clear a chat for yourself only — hides message history up to now on your
+// side. The other person's copy is untouched. chatKey is either the other
+// user's id (direct chat) or 'group:<groupId>' (group chat).
+app.post('/api/chats/:chatKey/clear', authenticate, h(async (req, res) => {
+  await db.run(
+    `INSERT INTO chat_clears (owner_id, chat_key, cleared_at) VALUES ($1, $2, $3)
+     ON CONFLICT (owner_id, chat_key) DO UPDATE SET cleared_at = $3`,
+    [req.userId, req.params.chatKey, Date.now()]
+  );
+  res.json({ ok: true });
+}));
+
+// ---------- profile ----------
+
+app.get('/api/profile', authenticate, h(async (req, res) => {
+  const user = await db.get('SELECT id, name, phone, avatar_url FROM users WHERE id = $1', [req.userId]);
+  res.json(user);
+}));
+
+app.put('/api/profile', authenticate, h(async (req, res) => {
+  const { name, phone } = req.body;
+  if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
+
+  const existing = await db.get('SELECT id FROM users WHERE phone = $1 AND id != $2', [phone, req.userId]);
+  if (existing) return res.status(409).json({ error: 'That phone number is already in use' });
+
+  await db.run('UPDATE users SET name = $1, phone = $2 WHERE id = $3', [name, phone, req.userId]);
+  const updated = await db.get('SELECT id, name, phone, avatar_url FROM users WHERE id = $1', [req.userId]);
+  res.json(updated);
+}));
+
+app.post(
+  '/api/profile/avatar',
+  authenticate,
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  h(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    if (!process.env.CLOUDINARY_URL) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(500).json({ error: 'Media storage is not configured (CLOUDINARY_URL missing)' });
+    }
+
+    try {
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        resource_type: 'image',
+        transformation: [{ width: 300, height: 300, crop: 'fill', gravity: 'face' }],
+      });
+      await db.run('UPDATE users SET avatar_url = $1 WHERE id = $2', [result.secure_url, req.userId]);
+      res.json({ avatar_url: result.secure_url });
+    } catch (err) {
+      console.error('Avatar upload error:', err);
+      res.status(502).json({ error: err.message || 'Upload to storage provider failed' });
+    } finally {
+      fs.unlink(req.file.path, () => {});
+    }
+  })
+);
+
+app.put('/api/profile/password', authenticate, h(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Current and new password are required' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters' });
+  }
+
+  const user = await db.get('SELECT * FROM users WHERE id = $1', [req.userId]);
+  if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+
+  const newHash = bcrypt.hashSync(newPassword, 10);
+  await db.run('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.userId]);
+  res.json({ ok: true });
 }));
 
 // ---------- media upload ----------
@@ -173,6 +273,7 @@ app.post(
   h(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
     if (!process.env.CLOUDINARY_URL) {
+      fs.unlink(req.file.path, () => {});
       return res.status(500).json({ error: 'Media storage is not configured (CLOUDINARY_URL missing)' });
     }
 
@@ -182,8 +283,17 @@ app.post(
     else if (mimetype.startsWith('audio/')) mediaType = 'audio';
     else if (mimetype.startsWith('video/')) mediaType = 'video';
 
-    const result = await uploadBufferToCloudinary(req.file.buffer);
-    res.json({ url: result.secure_url, mediaType });
+    try {
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        resource_type: resourceTypeFor(mimetype),
+      });
+      res.json({ url: result.secure_url, mediaType });
+    } catch (err) {
+      console.error('Cloudinary upload error:', err);
+      res.status(502).json({ error: err.message || 'Upload to storage provider failed' });
+    } finally {
+      fs.unlink(req.file.path, () => {}); // always clean up the temp file
+    }
   })
 );
 
@@ -193,11 +303,44 @@ app.get('/api/messages/:otherId', authenticate, h(async (req, res) => {
   const { otherId } = req.params;
   const messages = await db.all(
     `SELECT * FROM messages
-     WHERE (from_user = $1 AND to_user = $2) OR (from_user = $2 AND to_user = $1)
+     WHERE ((from_user = $1 AND to_user = $2) OR (from_user = $2 AND to_user = $1))
+     AND timestamp > COALESCE((SELECT cleared_at FROM chat_clears WHERE owner_id = $1 AND chat_key = $2), 0)
      ORDER BY timestamp ASC`,
     [req.userId, otherId]
   );
   res.json(messages);
+}));
+
+// Delete a message you sent — for everyone, since this server is the single
+// source of truth for all participants (unlike device-local chat apps).
+app.delete('/api/messages/:messageId', authenticate, h(async (req, res) => {
+  const message = await db.get('SELECT * FROM messages WHERE id = $1', [req.params.messageId]);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.from_user !== req.userId) {
+    return res.status(403).json({ error: 'You can only delete your own messages' });
+  }
+
+  await db.run(
+    "UPDATE messages SET deleted = 1, text = '', media_url = NULL, media_type = NULL WHERE id = $1",
+    [req.params.messageId]
+  );
+
+  if (message.group_id) {
+    const members = (
+      await db.all('SELECT user_id FROM group_members WHERE group_id = $1', [message.group_id])
+    ).map((m) => m.user_id);
+    members.forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) io.to(sockId).emit('message_deleted', { id: message.id, groupId: message.group_id });
+    });
+  } else {
+    [message.from_user, message.to_user].forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) io.to(sockId).emit('message_deleted', { id: message.id, otherId: uid === message.from_user ? message.to_user : message.from_user });
+    });
+  }
+
+  res.json({ ok: true });
 }));
 
 // Mark all messages from `otherId` to me as read
@@ -274,9 +417,13 @@ app.get('/api/groups/:groupId/messages', authenticate, h(async (req, res) => {
   );
   if (!isMember) return res.status(403).json({ error: 'Not a member of this group' });
 
-  const messages = await db.all('SELECT * FROM messages WHERE group_id = $1 ORDER BY timestamp ASC', [
-    req.params.groupId,
-  ]);
+  const chatKey = `group:${req.params.groupId}`;
+  const messages = await db.all(
+    `SELECT * FROM messages WHERE group_id = $1
+     AND timestamp > COALESCE((SELECT cleared_at FROM chat_clears WHERE owner_id = $2 AND chat_key = $3), 0)
+     ORDER BY timestamp ASC`,
+    [req.params.groupId, req.userId, chatKey]
+  );
   res.json(messages);
 }));
 
