@@ -449,7 +449,8 @@ function paintMessage(div, msg, isOut) {
     } else if (msg.media_type === 'video') {
       mediaHtml = `<video class="msg-media-image" controls src="${msg.media_url}"></video>`;
     } else {
-      mediaHtml = `<a class="msg-media-file" href="${msg.media_url}" target="_blank">📎 Download file</a>`;
+      const displayName = msg.media_filename ? escapeHtml(msg.media_filename) : 'Download file';
+      mediaHtml = `<a class="msg-media-file" href="${msg.media_url}" target="_blank">📎 ${displayName}</a>`;
     }
   }
 
@@ -459,14 +460,49 @@ function paintMessage(div, msg, isOut) {
   const canEdit = isOut && Date.now() - Number(msg.timestamp) < EDIT_WINDOW_MS;
   const editBtnHtml = canEdit ? `<button type="button" class="msg-edit-btn" title="Edit message">✏️</button>` : '';
   const deleteBtnHtml = isOut ? `<button type="button" class="msg-delete-btn" title="Delete message">🗑</button>` : '';
+  const copyBtnHtml = `<button type="button" class="msg-copy-btn" title="Copy message">📋</button>`;
 
-  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${editedHtml}${time}${ticksHtml}${editBtnHtml}${deleteBtnHtml}</span>`;
+  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${editedHtml}${time}${ticksHtml}${copyBtnHtml}${editBtnHtml}${deleteBtnHtml}</span>`;
+
+  div.querySelector('.msg-copy-btn').addEventListener('click', () => copyMessage(msg));
+  attachLongPressCopy(div, msg);
 
   if (isOut) {
     div.querySelector('.msg-delete-btn').addEventListener('click', () => deleteMessage(msg.id));
     const editBtn = div.querySelector('.msg-edit-btn');
     if (editBtn) editBtn.addEventListener('click', () => startEditMessage(div, msg));
   }
+}
+
+function copyMessage(msg) {
+  const toCopy = msg.text || msg.media_url || '';
+  if (!toCopy) return;
+  navigator.clipboard.writeText(toCopy).then(() => showCopiedToast());
+}
+
+function showCopiedToast() {
+  const toast = document.createElement('div');
+  toast.className = 'copied-toast';
+  toast.textContent = 'Copied!';
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 1200);
+}
+
+// Long-press (touch or mouse-hold) on a message copies it — works
+// alongside the visible 📋 button for discoverability on desktop.
+function attachLongPressCopy(div, msg) {
+  let pressTimer = null;
+  const start = () => {
+    pressTimer = setTimeout(() => copyMessage(msg), 500);
+  };
+  const cancel = () => clearTimeout(pressTimer);
+
+  div.addEventListener('touchstart', start);
+  div.addEventListener('touchend', cancel);
+  div.addEventListener('touchmove', cancel);
+  div.addEventListener('mousedown', start);
+  div.addEventListener('mouseup', cancel);
+  div.addEventListener('mouseleave', cancel);
 }
 
 function markMessageDeleted(id) {
@@ -551,13 +587,13 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function sendMessage({ text, mediaUrl, mediaType }) {
+function sendMessage({ text, mediaUrl, mediaType, mediaFilename }) {
   if (!activeChat) return;
   if (activeChat.type === 'user') {
-    socket.emit('send_message', { to: activeChat.id, text, mediaUrl, mediaType });
+    socket.emit('send_message', { to: activeChat.id, text, mediaUrl, mediaType, mediaFilename });
     socket.emit('stop_typing', { to: activeChat.id });
   } else {
-    socket.emit('send_group_message', { groupId: activeChat.id, text, mediaUrl, mediaType });
+    socket.emit('send_group_message', { groupId: activeChat.id, text, mediaUrl, mediaType, mediaFilename });
   }
 }
 
@@ -659,12 +695,6 @@ uploadSendBtn.addEventListener('click', async () => {
   await uploadAndSend(fileOrBlob, filename);
 });
 
-function resourceTypeForMime(mimetype) {
-  if (mimetype.startsWith('image/')) return 'image';
-  if (mimetype.startsWith('video/') || mimetype.startsWith('audio/')) return 'video';
-  return 'raw';
-}
-
 function mediaTypeForMime(mimetype) {
   if (mimetype.startsWith('image/')) return 'image';
   if (mimetype.startsWith('audio/')) return 'audio';
@@ -672,79 +702,91 @@ function mediaTypeForMime(mimetype) {
   return 'file';
 }
 
-function showUploadProgress(percent) {
+// Compact inline progress: small ring + filename + percent, not a big
+// centered circle that pushes everything else out of view.
+function showUploadProgress(percent, filename) {
   uploadPreview.classList.remove('hidden');
   uploadCancelBtn.classList.add('hidden');
   uploadSendBtn.classList.add('hidden');
 
-  const radius = 26;
+  const radius = 12;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (percent / 100) * circumference;
 
   uploadPreviewContent.innerHTML = `
-    <div class="upload-progress-wrap">
-      <svg width="64" height="64" viewBox="0 0 64 64">
-        <circle cx="32" cy="32" r="${radius}" stroke="#e0e0e0" stroke-width="6" fill="none" />
-        <circle cx="32" cy="32" r="${radius}" stroke="#25D366" stroke-width="6" fill="none"
+    <div class="upload-progress-row">
+      <svg width="30" height="30" viewBox="0 0 30 30" class="upload-progress-mini">
+        <circle cx="15" cy="15" r="${radius}" stroke="#e0e0e0" stroke-width="4" fill="none" />
+        <circle cx="15" cy="15" r="${radius}" stroke="#25D366" stroke-width="4" fill="none"
           stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
-          stroke-linecap="round" transform="rotate(-90 32 32)" />
+          stroke-linecap="round" transform="rotate(-90 15 15)" />
       </svg>
-      <div class="upload-progress-text">${percent}%</div>
+      <span class="upload-progress-filename">${escapeHtml(filename || 'Uploading…')}</span>
+      <span class="upload-progress-percent">${percent}%</span>
     </div>
   `;
 }
 
+// Uploads go through our own server (which streams to Cloudinary), using
+// XHR so we still get a real progress percentage. Same-origin, so it's
+// reliable — no cross-origin upload risk.
 async function uploadAndSend(fileOrBlob, filename) {
   if (!activeChat) return;
-  showUploadProgress(0);
+  showUploadProgress(0, filename);
+
+  const mimetype = fileOrBlob.type || '';
+  const mediaType = mediaTypeForMime(mimetype);
+
+  const formData = new FormData();
+  formData.append('file', fileOrBlob, filename || 'upload');
 
   try {
-    const sigRes = await fetch('/api/upload/signature', { method: 'POST', headers: authHeaders() });
-    const sig = await sigRes.json();
-    if (!sigRes.ok) {
-      uploadPreview.classList.add('hidden');
-      alert(sig.error || 'Could not prepare upload');
-      return;
-    }
-
-    const mimetype = fileOrBlob.type || '';
-    const resourceType = resourceTypeForMime(mimetype);
-    const mediaType = mediaTypeForMime(mimetype);
-
-    const formData = new FormData();
-    formData.append('file', fileOrBlob, filename || 'upload');
-    formData.append('api_key', sig.apiKey);
-    formData.append('timestamp', sig.timestamp);
-    formData.append('signature', sig.signature);
-
-    // Uploads go straight from this browser to Cloudinary — not through our
-    // server — which is faster for large files and lets us show real progress.
-    const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${sig.cloudName}/${resourceType}/upload`;
-
-    const result = await new Promise((resolve, reject) => {
+    const data = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', cloudinaryUrl);
+      xhr.open('POST', '/api/upload');
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) showUploadProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable) showUploadProgress(Math.round((e.loaded / e.total) * 100), filename);
       };
       xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText));
-        } else {
-          reject(new Error('Upload to storage failed. The file may be too large for the current plan.'));
+        let parsed;
+        try {
+          parsed = JSON.parse(xhr.responseText);
+        } catch {
+          return reject(new Error('Upload failed — unexpected server response.'));
         }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(parsed);
+        else reject(new Error(parsed.error || 'Upload failed'));
       };
       xhr.onerror = () => reject(new Error('Upload failed — check your internet connection.'));
       xhr.send(formData);
     });
 
     uploadPreview.classList.add('hidden');
-    sendMessage({ text: '', mediaUrl: result.secure_url, mediaType });
+    sendMessage({ text: '', mediaUrl: data.url, mediaType: data.mediaType || mediaType, mediaFilename: data.filename || filename });
   } catch (err) {
     uploadPreview.classList.add('hidden');
     alert(err.message || 'Upload failed');
   }
 }
+
+// ---------- Paste-to-attach (Ctrl+V) ----------
+messageInput.addEventListener('paste', (e) => {
+  if (!activeChat) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        showUploadPreview(file, file.name || `pasted-${Date.now()}`);
+        return;
+      }
+    }
+  }
+});
 
 // ---------- Voice recording (preview + confirm before sending) ----------
 let mediaRecorder = null;

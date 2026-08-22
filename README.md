@@ -41,8 +41,20 @@ password auth, WhatsApp-style frontend.
 - Fixed: online/offline status now self-corrects every few seconds from
   the server's live connection list, instead of only trusting push updates
   that could occasionally be missed
-- Large file uploads now go directly from your browser to storage instead
-  of relaying through the app server — meaningfully faster for big files
+- **Copy any message** — tap the 📋 icon or long-press (touch/mouse-hold)
+  a message to copy its text to your clipboard
+- **Paste to attach** — Ctrl+V an image/file copied from elsewhere directly
+  into the message box to attach it, no need to save it first
+- Real file names now shown for attached documents, instead of a generic
+  "Download file" label
+- Compact inline upload progress (small ring + filename + %) instead of a
+  large centered circle
+- Fixed: media/voice uploads go back through the app server (reliable)
+  instead of a direct-to-storage path that was failing in practice, while
+  keeping a real progress percentage
+- **Fixed a serious mobile bug**: the message input and Send button could
+  disappear entirely off-screen on phones, caused by how mobile browsers
+  handle full-screen height with their address bar. Fixed properly.
 
 ## Coming in later layers
 - Push notifications

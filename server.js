@@ -314,7 +314,7 @@ app.post(
       const result = await cloudinary.uploader.upload(req.file.path, {
         resource_type: resourceTypeFor(mimetype),
       });
-      res.json({ url: result.secure_url, mediaType });
+      res.json({ url: result.secure_url, mediaType, filename: req.file.originalname });
     } catch (err) {
       console.error('Cloudinary upload error:', err);
       res.status(502).json({ error: err.message || 'Upload to storage provider failed' });
@@ -518,7 +518,7 @@ io.on('connection', (socket) => {
   io.emit('presence_update', Array.from(onlineUsers.keys()));
 
   // ---- direct messages ----
-  socket.on('send_message', async ({ to, text, mediaUrl, mediaType }) => {
+  socket.on('send_message', async ({ to, text, mediaUrl, mediaType, mediaFilename }) => {
     if (!to || (!text && !mediaUrl)) return;
     const message = {
       id: makeId(),
@@ -531,6 +531,7 @@ io.on('connection', (socket) => {
       read: 0,
       media_url: mediaUrl || null,
       media_type: mediaType || null,
+      media_filename: mediaFilename || null,
     };
 
     const targetSocketId = onlineUsers.get(to);
@@ -541,8 +542,8 @@ io.on('connection', (socket) => {
 
     try {
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, $8)`,
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, $8, $9)`,
         [
           message.id,
           message.from_user,
@@ -552,6 +553,7 @@ io.on('connection', (socket) => {
           message.delivered,
           message.media_url,
           message.media_type,
+          message.media_filename,
         ]
       );
       socket.emit('message_sent', message);
@@ -561,7 +563,7 @@ io.on('connection', (socket) => {
   });
 
   // ---- group messages ----
-  socket.on('send_group_message', async ({ groupId, text, mediaUrl, mediaType }) => {
+  socket.on('send_group_message', async ({ groupId, text, mediaUrl, mediaType, mediaFilename }) => {
     if (!groupId || (!text && !mediaUrl)) return;
     try {
       const isMember = await db.get(
@@ -581,11 +583,12 @@ io.on('connection', (socket) => {
         read: 0,
         media_url: mediaUrl || null,
         media_type: mediaType || null,
+        media_filename: mediaFilename || null,
       };
 
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type)
-         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0, $6, $7)`,
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename)
+         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0, $6, $7, $8)`,
         [
           message.id,
           message.from_user,
@@ -594,6 +597,7 @@ io.on('connection', (socket) => {
           message.timestamp,
           message.media_url,
           message.media_type,
+          message.media_filename,
         ]
       );
 
