@@ -326,6 +326,19 @@ app.post(
 
 // ---------- direct messages ----------
 
+// Attaches a `reactions` array (e.g. [{ emoji, user_id }]) to each message.
+async function withReactions(messages) {
+  if (messages.length === 0) return messages;
+  const ids = messages.map((m) => m.id);
+  const rows = await db.all('SELECT message_id, user_id, emoji FROM message_reactions WHERE message_id = ANY($1)', [ids]);
+  const byMessage = new Map();
+  rows.forEach((r) => {
+    if (!byMessage.has(r.message_id)) byMessage.set(r.message_id, []);
+    byMessage.get(r.message_id).push({ emoji: r.emoji, user_id: r.user_id });
+  });
+  return messages.map((m) => ({ ...m, reactions: byMessage.get(m.id) || [] }));
+}
+
 app.get('/api/messages/:otherId', authenticate, h(async (req, res) => {
   const { otherId } = req.params;
   const messages = await db.all(
@@ -335,7 +348,7 @@ app.get('/api/messages/:otherId', authenticate, h(async (req, res) => {
      ORDER BY timestamp ASC`,
     [req.userId, otherId]
   );
-  res.json(messages);
+  res.json(await withReactions(messages));
 }));
 
 // Delete a message you sent — for everyone, since this server is the single
@@ -413,6 +426,61 @@ app.put('/api/messages/:messageId', authenticate, h(async (req, res) => {
   }
 
   res.json({ ok: true, text: trimmed });
+}));
+
+// Broadcasts updated reactions for a message to everyone who can see it.
+async function broadcastReactions(message) {
+  const reactions = await db.all('SELECT user_id, emoji FROM message_reactions WHERE message_id = $1', [message.id]);
+  const payload = { messageId: message.id, reactions };
+
+  if (message.group_id) {
+    const members = (
+      await db.all('SELECT user_id FROM group_members WHERE group_id = $1', [message.group_id])
+    ).map((m) => m.user_id);
+    members.forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) io.to(sockId).emit('message_reaction_updated', { ...payload, groupId: message.group_id });
+    });
+  } else {
+    [message.from_user, message.to_user].forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) {
+        io.to(sockId).emit('message_reaction_updated', {
+          ...payload,
+          otherId: uid === message.from_user ? message.to_user : message.from_user,
+        });
+      }
+    });
+  }
+}
+
+// Add/change your reaction on a message (one reaction per user per message).
+app.post('/api/messages/:messageId/react', authenticate, h(async (req, res) => {
+  const { emoji } = req.body;
+  if (!emoji) return res.status(400).json({ error: 'Emoji is required' });
+
+  const message = await db.get('SELECT * FROM messages WHERE id = $1', [req.params.messageId]);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+
+  await db.run(
+    `INSERT INTO message_reactions (message_id, user_id, emoji, created_at) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = $3, created_at = $4`,
+    [message.id, req.userId, emoji, Date.now()]
+  );
+
+  await broadcastReactions(message);
+  res.json({ ok: true });
+}));
+
+// Remove your own reaction from a message.
+app.delete('/api/messages/:messageId/react', authenticate, h(async (req, res) => {
+  const message = await db.get('SELECT * FROM messages WHERE id = $1', [req.params.messageId]);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+
+  await db.run('DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2', [message.id, req.userId]);
+
+  await broadcastReactions(message);
+  res.json({ ok: true });
 }));
 
 // Mark all messages from `otherId` to me as read
@@ -496,7 +564,7 @@ app.get('/api/groups/:groupId/messages', authenticate, h(async (req, res) => {
      ORDER BY timestamp ASC`,
     [req.params.groupId, req.userId, chatKey]
   );
-  res.json(messages);
+  res.json(await withReactions(messages));
 }));
 
 // ---------- real-time layer ----------
@@ -517,9 +585,30 @@ io.on('connection', (socket) => {
   onlineUsers.set(socket.userId, socket.id);
   io.emit('presence_update', Array.from(onlineUsers.keys()));
 
+  // Builds a small denormalized snapshot of the message being replied to,
+  // so rendering a reply never needs an extra lookup/join later.
+  async function buildReplySnapshot(replyToId) {
+    if (!replyToId) return { reply_to_id: null, reply_snippet: null, reply_sender_name: null };
+    const original = await db.get(
+      `SELECT m.text, m.media_type, u.name AS sender_name FROM messages m
+       JOIN users u ON u.id = m.from_user WHERE m.id = $1`,
+      [replyToId]
+    );
+    if (!original) return { reply_to_id: null, reply_snippet: null, reply_sender_name: null };
+
+    let snippet = original.text;
+    if (!snippet && original.media_type) {
+      snippet =
+        { image: '📷 Photo', audio: '🎤 Voice note', video: '🎥 Video', file: '📎 File' }[original.media_type] ||
+        'Attachment';
+    }
+    return { reply_to_id: replyToId, reply_snippet: snippet || '', reply_sender_name: original.sender_name };
+  }
+
   // ---- direct messages ----
-  socket.on('send_message', async ({ to, text, mediaUrl, mediaType, mediaFilename }) => {
+  socket.on('send_message', async ({ to, text, mediaUrl, mediaType, mediaFilename, replyToId }) => {
     if (!to || (!text && !mediaUrl)) return;
+    const reply = await buildReplySnapshot(replyToId);
     const message = {
       id: makeId(),
       from_user: socket.userId,
@@ -532,6 +621,7 @@ io.on('connection', (socket) => {
       media_url: mediaUrl || null,
       media_type: mediaType || null,
       media_filename: mediaFilename || null,
+      ...reply,
     };
 
     const targetSocketId = onlineUsers.get(to);
@@ -542,8 +632,8 @@ io.on('connection', (socket) => {
 
     try {
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, $8, $9)`,
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename, reply_to_id, reply_snippet, reply_sender_name)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12)`,
         [
           message.id,
           message.from_user,
@@ -554,6 +644,9 @@ io.on('connection', (socket) => {
           message.media_url,
           message.media_type,
           message.media_filename,
+          message.reply_to_id,
+          message.reply_snippet,
+          message.reply_sender_name,
         ]
       );
       socket.emit('message_sent', message);
@@ -563,7 +656,7 @@ io.on('connection', (socket) => {
   });
 
   // ---- group messages ----
-  socket.on('send_group_message', async ({ groupId, text, mediaUrl, mediaType, mediaFilename }) => {
+  socket.on('send_group_message', async ({ groupId, text, mediaUrl, mediaType, mediaFilename, replyToId }) => {
     if (!groupId || (!text && !mediaUrl)) return;
     try {
       const isMember = await db.get(
@@ -572,6 +665,7 @@ io.on('connection', (socket) => {
       );
       if (!isMember) return;
 
+      const reply = await buildReplySnapshot(replyToId);
       const message = {
         id: makeId(),
         from_user: socket.userId,
@@ -584,11 +678,12 @@ io.on('connection', (socket) => {
         media_url: mediaUrl || null,
         media_type: mediaType || null,
         media_filename: mediaFilename || null,
+        ...reply,
       };
 
       await db.run(
-        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename)
-         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0, $6, $7, $8)`,
+        `INSERT INTO messages (id, from_user, to_user, group_id, text, timestamp, delivered, read, media_url, media_type, media_filename, reply_to_id, reply_snippet, reply_sender_name)
+         VALUES ($1, $2, NULL, $3, $4, $5, 1, 0, $6, $7, $8, $9, $10, $11)`,
         [
           message.id,
           message.from_user,
@@ -598,6 +693,9 @@ io.on('connection', (socket) => {
           message.media_url,
           message.media_type,
           message.media_filename,
+          message.reply_to_id,
+          message.reply_snippet,
+          message.reply_sender_name,
         ]
       );
 

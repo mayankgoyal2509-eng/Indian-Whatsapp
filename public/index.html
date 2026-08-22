@@ -85,6 +85,14 @@
             </div>
           </div>
 
+          <div id="reply-preview" class="reply-preview hidden">
+            <div class="reply-preview-body">
+              <div class="reply-preview-sender" id="reply-preview-sender"></div>
+              <div class="reply-preview-snippet" id="reply-preview-snippet"></div>
+            </div>
+            <button type="button" id="reply-cancel-btn">✕</button>
+          </div>
+
           <form id="message-form" class="message-form">
             <input type="file" id="file-input" hidden />
             <button type="button" id="attach-btn" class="icon-btn" title="Attach file">📎</button>
@@ -96,6 +104,16 @@
       </div>
 
     </div>
+  </div>
+
+  <!-- REACTION PICKER (positioned dynamically near the tapped message) -->
+  <div id="reaction-picker" class="reaction-picker hidden">
+    <button type="button" class="reaction-option" data-emoji="👍">👍</button>
+    <button type="button" class="reaction-option" data-emoji="❤️">❤️</button>
+    <button type="button" class="reaction-option" data-emoji="😂">😂</button>
+    <button type="button" class="reaction-option" data-emoji="😮">😮</button>
+    <button type="button" class="reaction-option" data-emoji="😢">😢</button>
+    <button type="button" class="reaction-option" data-emoji="🙏">🙏</button>
   </div>
 
   <!-- PROFILE MODAL -->

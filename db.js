@@ -45,6 +45,18 @@ const SCHEMA = `
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_filename TEXT;
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_snippet TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_sender_name TEXT;
+
+  -- One reaction per user per message (a new tap replaces your old one)
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  );
 
   -- chat_key is the other user's id for direct chats, or 'group:<id>' for groups.
   -- Lets each person clear a chat for themselves without affecting the other side.

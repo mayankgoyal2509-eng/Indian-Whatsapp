@@ -220,6 +220,18 @@ function startApp() {
     paintMessage(div, div._msg, div._isOut);
   });
 
+  socket.on('message_reaction_updated', ({ messageId, reactions, otherId, groupId }) => {
+    const inThisChat =
+      activeChat &&
+      ((activeChat.type === 'user' && otherId === activeChat.id) ||
+        (activeChat.type === 'group' && groupId === activeChat.id));
+    if (!inThisChat) return;
+    const div = messagesEl.querySelector(`[data-id="${messageId}"]`);
+    if (!div || !div._msg) return;
+    div._msg.reactions = reactions;
+    paintMessage(div, div._msg, div._isOut);
+  });
+
   loadContacts();
   loadGroups();
   setInterval(() => {
@@ -342,6 +354,7 @@ async function openGroupChat(group) {
 
 function showChatPanel(name, isGroup) {
   clearPendingUpload();
+  clearReply();
   uploadPreview.classList.add('hidden');
   chatEmpty.classList.add('hidden');
   chatActive.classList.remove('hidden');
@@ -454,6 +467,14 @@ function paintMessage(div, msg, isOut) {
     }
   }
 
+  let replyHtml = '';
+  if (msg.reply_to_id) {
+    replyHtml = `<div class="msg-reply-quote">
+      <div class="msg-reply-sender">${escapeHtml(msg.reply_sender_name || '')}</div>
+      <div class="msg-reply-snippet">${escapeHtml(msg.reply_snippet || '')}</div>
+    </div>`;
+  }
+
   const textHtml = msg.text ? linkify(escapeHtml(msg.text)) : '';
   const editedHtml = msg.edited ? `<span class="edited-label">edited</span>` : '';
 
@@ -461,11 +482,18 @@ function paintMessage(div, msg, isOut) {
   const editBtnHtml = canEdit ? `<button type="button" class="msg-edit-btn" title="Edit message">✏️</button>` : '';
   const deleteBtnHtml = isOut ? `<button type="button" class="msg-delete-btn" title="Delete message">🗑</button>` : '';
   const copyBtnHtml = `<button type="button" class="msg-copy-btn" title="Copy message">📋</button>`;
+  const replyBtnHtml = `<button type="button" class="msg-reply-btn" title="Reply">↩️</button>`;
+  const reactBtnHtml = `<button type="button" class="msg-react-btn" title="React">😊</button>`;
 
-  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${editedHtml}${time}${ticksHtml}${copyBtnHtml}${editBtnHtml}${deleteBtnHtml}</span>`;
+  const reactionsHtml = renderReactionBadges(msg.reactions);
+
+  div.innerHTML = `${replyHtml}${mediaHtml}${textHtml}<span class="msg-time">${editedHtml}${time}${ticksHtml}${reactBtnHtml}${replyBtnHtml}${copyBtnHtml}${editBtnHtml}${deleteBtnHtml}</span>${reactionsHtml}`;
 
   div.querySelector('.msg-copy-btn').addEventListener('click', () => copyMessage(msg));
+  div.querySelector('.msg-reply-btn').addEventListener('click', () => startReply(msg));
+  div.querySelector('.msg-react-btn').addEventListener('click', (e) => openReactionPicker(e, msg));
   attachLongPressCopy(div, msg);
+  wireReactionBadges(div, msg);
 
   if (isOut) {
     div.querySelector('.msg-delete-btn').addEventListener('click', () => deleteMessage(msg.id));
@@ -473,6 +501,67 @@ function paintMessage(div, msg, isOut) {
     if (editBtn) editBtn.addEventListener('click', () => startEditMessage(div, msg));
   }
 }
+
+// ---------- Reactions ----------
+function renderReactionBadges(reactions) {
+  if (!reactions || reactions.length === 0) return '';
+  const counts = {};
+  reactions.forEach((r) => {
+    counts[r.emoji] = counts[r.emoji] || { count: 0, mine: false };
+    counts[r.emoji].count += 1;
+    if (r.user_id === me.id) counts[r.emoji].mine = true;
+  });
+  const badges = Object.entries(counts)
+    .map(
+      ([emoji, info]) =>
+        `<button type="button" class="reaction-badge ${info.mine ? 'mine' : ''}" data-emoji="${emoji}">${emoji} ${info.count}</button>`
+    )
+    .join('');
+  return `<div class="msg-reactions">${badges}</div>`;
+}
+
+function wireReactionBadges(div, msg) {
+  const badges = div.querySelectorAll('.reaction-badge');
+  badges.forEach((badge) => {
+    badge.addEventListener('click', () => toggleReaction(msg, badge.dataset.emoji, badge.classList.contains('mine')));
+  });
+}
+
+async function toggleReaction(msg, emoji, alreadyMine) {
+  if (alreadyMine) {
+    await fetch(`/api/messages/${msg.id}/react`, { method: 'DELETE', headers: authHeaders() });
+  } else {
+    await fetch(`/api/messages/${msg.id}/react`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ emoji }),
+    });
+  }
+}
+
+const reactionPicker = document.getElementById('reaction-picker');
+let reactionPickerTarget = null;
+
+function openReactionPicker(e, msg) {
+  reactionPickerTarget = msg;
+  const rect = e.target.getBoundingClientRect();
+  reactionPicker.style.top = `${rect.top - 46}px`;
+  reactionPicker.style.left = `${Math.max(8, rect.left - 100)}px`;
+  reactionPicker.classList.remove('hidden');
+}
+
+document.querySelectorAll('.reaction-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (reactionPickerTarget) toggleReaction(reactionPickerTarget, btn.dataset.emoji, false);
+    reactionPicker.classList.add('hidden');
+  });
+});
+
+document.addEventListener('click', (e) => {
+  if (!reactionPicker.classList.contains('hidden') && !reactionPicker.contains(e.target) && !e.target.classList.contains('msg-react-btn')) {
+    reactionPicker.classList.add('hidden');
+  }
+});
 
 function copyMessage(msg) {
   const toCopy = msg.text || msg.media_url || '';
@@ -587,15 +676,44 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+let replyingTo = null; // { id, senderName, snippet }
+
 function sendMessage({ text, mediaUrl, mediaType, mediaFilename }) {
   if (!activeChat) return;
+  const replyToId = replyingTo ? replyingTo.id : undefined;
   if (activeChat.type === 'user') {
-    socket.emit('send_message', { to: activeChat.id, text, mediaUrl, mediaType, mediaFilename });
+    socket.emit('send_message', { to: activeChat.id, text, mediaUrl, mediaType, mediaFilename, replyToId });
     socket.emit('stop_typing', { to: activeChat.id });
   } else {
-    socket.emit('send_group_message', { groupId: activeChat.id, text, mediaUrl, mediaType, mediaFilename });
+    socket.emit('send_group_message', { groupId: activeChat.id, text, mediaUrl, mediaType, mediaFilename, replyToId });
   }
+  clearReply();
 }
+
+// ---------- Reply to message ----------
+const replyPreview = document.getElementById('reply-preview');
+const replyPreviewSender = document.getElementById('reply-preview-sender');
+const replyPreviewSnippet = document.getElementById('reply-preview-snippet');
+
+function startReply(msg) {
+  const senderName = msg.from_user === me.id ? 'You' : (activeChat.type === 'group' ? (msg.sender_name || 'Them') : activeChat.name);
+  let snippet = msg.text;
+  if (!snippet && msg.media_type) {
+    snippet = { image: '📷 Photo', audio: '🎤 Voice note', video: '🎥 Video', file: '📎 File' }[msg.media_type] || 'Attachment';
+  }
+  replyingTo = { id: msg.id, senderName, snippet: snippet || '' };
+  replyPreviewSender.textContent = senderName;
+  replyPreviewSnippet.textContent = snippet || '';
+  replyPreview.classList.remove('hidden');
+  messageInput.focus();
+}
+
+function clearReply() {
+  replyingTo = null;
+  replyPreview.classList.add('hidden');
+}
+
+document.getElementById('reply-cancel-btn').addEventListener('click', clearReply);
 
 messageForm.addEventListener('submit', (e) => {
   e.preventDefault();

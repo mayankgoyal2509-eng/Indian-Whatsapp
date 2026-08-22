@@ -52,15 +52,21 @@ password auth, WhatsApp-style frontend.
 - Fixed: media/voice uploads go back through the app server (reliable)
   instead of a direct-to-storage path that was failing in practice, while
   keeping a real progress percentage
+- **Emoji reactions** — tap 😊 on any message to react (👍❤️😂😮😢🙏), or
+  tap an existing reaction badge to add/remove your own; updates live for
+  everyone in the chat
+- **Reply to a specific message** — tap ↩️ to quote it, shows a preview
+  above the input, and the sent message shows the quoted snippet
 - **Fixed a serious mobile bug**: the message input and Send button could
   disappear entirely off-screen on phones, caused by how mobile browsers
   handle full-screen height with their address bar. Fixed properly.
 
 ## Coming in later layers
+- Status/Stories tab
+- Voice/video calls (WebRTC)
 - Push notifications
 - End-to-end encryption
-- Voice/video calls (WebRTC)
-- Chat folders
+- Group admin controls (add/remove members, group photo)
 
 ## Getting free media storage (Cloudinary)
 1. Go to cloudinary.com, sign up free.
