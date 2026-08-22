@@ -141,7 +141,7 @@ function startApp() {
   myNameEl.textContent = me.name;
   myAvatarEl.innerHTML = avatarHtml(me, 'header-avatar');
 
-  socket = io({ auth: { token } });
+  socket = io({ auth: { token }, transports: ['websocket', 'polling'] });
 
   socket.on('presence_update', (ids) => {
     onlineUserIds = ids;
@@ -207,6 +207,19 @@ function startApp() {
     if (inThisChat) markMessageDeleted(id);
   });
 
+  socket.on('message_edited', ({ id, text, otherId, groupId }) => {
+    const inThisChat =
+      activeChat &&
+      ((activeChat.type === 'user' && otherId === activeChat.id) ||
+        (activeChat.type === 'group' && groupId === activeChat.id));
+    if (!inThisChat) return;
+    const div = messagesEl.querySelector(`[data-id="${id}"]`);
+    if (!div || !div._msg) return;
+    div._msg.text = text;
+    div._msg.edited = 1;
+    paintMessage(div, div._msg, div._isOut);
+  });
+
   loadContacts();
   loadGroups();
   setInterval(() => {
@@ -220,7 +233,17 @@ async function loadContacts() {
   const res = await fetch('/api/contacts', { headers: authHeaders() });
   if (res.status === 401) return logout();
   contacts = await res.json();
+
+  // Self-heal presence in case a socket push was ever missed: the server
+  // tells us who's *actually* online right now with this same request.
+  const trulyOnline = contacts.filter((c) => c.online).map((c) => c.id);
+  const trulyOffline = contacts.filter((c) => !c.online).map((c) => c.id);
+  onlineUserIds = Array.from(
+    new Set([...onlineUserIds.filter((id) => !trulyOffline.includes(id)), ...trulyOnline])
+  );
+
   renderContactList();
+  updateActiveStatus();
 }
 
 async function loadGroups() {
@@ -275,9 +298,12 @@ function renderContactList() {
   });
 }
 
+let chatLoadToken = 0; // guards against stale responses when switching chats quickly
+
 // ---------- 1-to-1 chat ----------
 async function openUserChat(contact) {
   activeChat = { type: 'user', id: contact.id, name: contact.name };
+  const myToken = ++chatLoadToken;
   renderContactList();
   showChatPanel(contact.name);
   document.getElementById('chat-header-avatar').innerHTML = avatarHtml(contact, 'header-avatar');
@@ -285,7 +311,9 @@ async function openUserChat(contact) {
 
   const res = await fetch(`/api/messages/${contact.id}`, { headers: authHeaders() });
   const history = await res.json();
+  if (myToken !== chatLoadToken) return; // a different chat was opened while this was loading
   messagesEl.innerHTML = '';
+  lastMessageDateLabel = null;
   history.forEach(renderMessage);
   scrollToBottom();
   markRead(contact.id);
@@ -298,13 +326,16 @@ function markRead(otherId) {
 // ---------- Group chat ----------
 async function openGroupChat(group) {
   activeChat = { type: 'group', id: group.id, name: group.name };
+  const myToken = ++chatLoadToken;
   renderContactList();
   showChatPanel(group.name, true);
   document.getElementById('chat-header-avatar').innerHTML = avatarHtml({ name: group.name }, 'header-avatar');
 
   const res = await fetch(`/api/groups/${group.id}/messages`, { headers: authHeaders() });
   const history = await res.json();
+  if (myToken !== chatLoadToken) return; // a different chat was opened while this was loading
   messagesEl.innerHTML = '';
+  lastMessageDateLabel = null;
   history.forEach(renderMessage);
   scrollToBottom();
 }
@@ -353,14 +384,44 @@ document.getElementById('delete-chat-btn').addEventListener('click', async () =>
 });
 
 // ---------- Messages ----------
+let lastMessageDateLabel = null;
+
+function dateLabelFor(timestampMs) {
+  const d = new Date(timestampMs);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+
+  if (sameDay(d, today)) return 'Today';
+  if (sameDay(d, yesterday)) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function maybeInsertDateDivider(timestampMs) {
+  const label = dateLabelFor(Number(timestampMs));
+  if (label !== lastMessageDateLabel) {
+    lastMessageDateLabel = label;
+    const divider = document.createElement('div');
+    divider.className = 'date-divider';
+    divider.innerHTML = `<span>${label}</span>`;
+    messagesEl.appendChild(divider);
+  }
+}
+
 function renderMessage(msg) {
+  maybeInsertDateDivider(msg.timestamp);
   const isOut = msg.from_user === me.id;
   const div = document.createElement('div');
   div.dataset.id = msg.id;
   div.className = 'msg ' + (isOut ? 'out' : 'in') + (msg.deleted ? ' deleted' : '');
+  div._msg = msg;
+  div._isOut = isOut;
   messagesEl.appendChild(div);
   paintMessage(div, msg, isOut);
 }
+
+const EDIT_WINDOW_MS = 15 * 60 * 1000; // matches WhatsApp's own edit window
 
 function paintMessage(div, msg, isOut) {
   if (msg.deleted) {
@@ -393,12 +454,18 @@ function paintMessage(div, msg, isOut) {
   }
 
   const textHtml = msg.text ? linkify(escapeHtml(msg.text)) : '';
+  const editedHtml = msg.edited ? `<span class="edited-label">edited</span>` : '';
+
+  const canEdit = isOut && Date.now() - Number(msg.timestamp) < EDIT_WINDOW_MS;
+  const editBtnHtml = canEdit ? `<button type="button" class="msg-edit-btn" title="Edit message">✏️</button>` : '';
   const deleteBtnHtml = isOut ? `<button type="button" class="msg-delete-btn" title="Delete message">🗑</button>` : '';
 
-  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${time}${ticksHtml}${deleteBtnHtml}</span>`;
+  div.innerHTML = `${mediaHtml}${textHtml}<span class="msg-time">${editedHtml}${time}${ticksHtml}${editBtnHtml}${deleteBtnHtml}</span>`;
 
   if (isOut) {
     div.querySelector('.msg-delete-btn').addEventListener('click', () => deleteMessage(msg.id));
+    const editBtn = div.querySelector('.msg-edit-btn');
+    if (editBtn) editBtn.addEventListener('click', () => startEditMessage(div, msg));
   }
 }
 
@@ -419,6 +486,65 @@ async function deleteMessage(id) {
     const data = await res.json().catch(() => ({}));
     alert(data.error || 'Could not delete message');
   }
+}
+
+function startEditMessage(div, msg) {
+  div.innerHTML = '';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'msg-edit-input';
+  input.value = msg.text;
+
+  const actions = document.createElement('div');
+  actions.className = 'msg-edit-actions';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'msg-edit-save';
+  saveBtn.textContent = '✓ Save';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'msg-edit-cancel';
+  cancelBtn.textContent = '✕ Cancel';
+  actions.appendChild(saveBtn);
+  actions.appendChild(cancelBtn);
+
+  div.appendChild(input);
+  div.appendChild(actions);
+  input.focus();
+  input.select();
+
+  function cancel() {
+    paintMessage(div, msg, true);
+  }
+
+  async function save() {
+    const newText = input.value.trim();
+    if (!newText) return;
+
+    const res = await fetch(`/api/messages/${msg.id}`, {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({ text: newText }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      alert(data.error || 'Could not edit message');
+      return;
+    }
+
+    msg.text = data.text;
+    msg.edited = 1;
+    paintMessage(div, msg, true);
+  }
+
+  saveBtn.addEventListener('click', save);
+  cancelBtn.addEventListener('click', cancel);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') cancel();
+  });
 }
 
 function scrollToBottom() {
@@ -468,6 +594,29 @@ fileInput.addEventListener('change', () => {
   if (file) showUploadPreview(file, file.name);
 });
 
+// ---------- Drag and drop (desktop) ----------
+['dragenter', 'dragover'].forEach((evt) => {
+  chatActive.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (activeChat) chatActive.classList.add('drag-over');
+  });
+});
+
+['dragleave', 'drop'].forEach((evt) => {
+  chatActive.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    chatActive.classList.remove('drag-over');
+  });
+});
+
+chatActive.addEventListener('drop', (e) => {
+  if (!activeChat) return;
+  const file = e.dataTransfer.files[0];
+  if (file) showUploadPreview(file, file.name);
+});
+
 function showUploadPreview(fileOrBlob, filename) {
   clearPendingUpload();
 
@@ -510,34 +659,90 @@ uploadSendBtn.addEventListener('click', async () => {
   await uploadAndSend(fileOrBlob, filename);
 });
 
-async function uploadAndSend(fileOrBlob, filename) {
-  if (!activeChat) return;
+function resourceTypeForMime(mimetype) {
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('video/') || mimetype.startsWith('audio/')) return 'video';
+  return 'raw';
+}
 
-  uploadPreviewContent.innerHTML = `<span>Uploading ${escapeHtml(filename || 'file')}…</span>`;
+function mediaTypeForMime(mimetype) {
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('audio/')) return 'audio';
+  if (mimetype.startsWith('video/')) return 'video';
+  return 'file';
+}
+
+function showUploadProgress(percent) {
+  uploadPreview.classList.remove('hidden');
   uploadCancelBtn.classList.add('hidden');
   uploadSendBtn.classList.add('hidden');
-  uploadPreview.classList.remove('hidden');
 
-  const formData = new FormData();
-  formData.append('file', fileOrBlob, filename || 'upload');
+  const radius = 26;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (percent / 100) * circumference;
+
+  uploadPreviewContent.innerHTML = `
+    <div class="upload-progress-wrap">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <circle cx="32" cy="32" r="${radius}" stroke="#e0e0e0" stroke-width="6" fill="none" />
+        <circle cx="32" cy="32" r="${radius}" stroke="#25D366" stroke-width="6" fill="none"
+          stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
+          stroke-linecap="round" transform="rotate(-90 32 32)" />
+      </svg>
+      <div class="upload-progress-text">${percent}%</div>
+    </div>
+  `;
+}
+
+async function uploadAndSend(fileOrBlob, filename) {
+  if (!activeChat) return;
+  showUploadProgress(0);
 
   try {
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData,
-    });
-    const data = await res.json();
-    uploadPreview.classList.add('hidden');
-
-    if (!res.ok) {
-      alert(data.error || 'Upload failed');
+    const sigRes = await fetch('/api/upload/signature', { method: 'POST', headers: authHeaders() });
+    const sig = await sigRes.json();
+    if (!sigRes.ok) {
+      uploadPreview.classList.add('hidden');
+      alert(sig.error || 'Could not prepare upload');
       return;
     }
-    sendMessage({ text: '', mediaUrl: data.url, mediaType: data.mediaType });
+
+    const mimetype = fileOrBlob.type || '';
+    const resourceType = resourceTypeForMime(mimetype);
+    const mediaType = mediaTypeForMime(mimetype);
+
+    const formData = new FormData();
+    formData.append('file', fileOrBlob, filename || 'upload');
+    formData.append('api_key', sig.apiKey);
+    formData.append('timestamp', sig.timestamp);
+    formData.append('signature', sig.signature);
+
+    // Uploads go straight from this browser to Cloudinary — not through our
+    // server — which is faster for large files and lets us show real progress.
+    const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${sig.cloudName}/${resourceType}/upload`;
+
+    const result = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', cloudinaryUrl);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) showUploadProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText));
+        } else {
+          reject(new Error('Upload to storage failed. The file may be too large for the current plan.'));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Upload failed — check your internet connection.'));
+      xhr.send(formData);
+    });
+
+    uploadPreview.classList.add('hidden');
+    sendMessage({ text: '', mediaUrl: result.secure_url, mediaType });
   } catch (err) {
     uploadPreview.classList.add('hidden');
-    alert('Upload failed — connection was interrupted, possibly because the file is large. Try a smaller file or check your internet connection.');
+    alert(err.message || 'Upload failed');
   }
 }
 
@@ -714,6 +919,27 @@ document.getElementById('avatar-file-input').addEventListener('change', async ()
     profileError.textContent = 'Upload failed. Check your connection and try again.';
     profileError.classList.remove('hidden');
   }
+});
+
+document.getElementById('remove-avatar-btn').addEventListener('click', async () => {
+  profileError.classList.add('hidden');
+  profileSuccess.classList.add('hidden');
+
+  const res = await fetch('/api/profile/avatar', { method: 'DELETE', headers: authHeaders() });
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    profileError.textContent = data.error || 'Could not remove photo';
+    profileError.classList.remove('hidden');
+    return;
+  }
+
+  me = { ...me, avatar_url: null };
+  localStorage.setItem('indichat_user', JSON.stringify(me));
+  myAvatarEl.innerHTML = avatarHtml(me, 'header-avatar');
+  document.getElementById('profile-avatar-preview').innerHTML = avatarHtml(me, 'profile-avatar-preview-circle');
+  profileSuccess.textContent = 'Photo removed.';
+  profileSuccess.classList.remove('hidden');
 });
 
 document.getElementById('profile-close-btn').addEventListener('click', () => {

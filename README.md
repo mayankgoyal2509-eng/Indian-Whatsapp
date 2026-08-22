@@ -18,6 +18,9 @@ password auth, WhatsApp-style frontend.
   shows a preview (with playback for audio) before it actually sends
 - **Delete a message** — removes it for everyone (shows "This message was
   deleted"); only the sender can delete their own messages
+- **Edit a sent message** — click ✏️ on your own message within 15 minutes
+  of sending (matches WhatsApp's own edit window); shows an "edited" tag
+  afterward, and updates live for the other person too
 - **Delete a chat** — clears the conversation on your side only; the other
   person's copy is untouched, and the chat reappears if they message again
 - **Profile settings** — click your name to edit your name/phone number,
@@ -27,6 +30,19 @@ password auth, WhatsApp-style frontend.
 - **Proper mobile layout** — on narrow screens, the contact list and chat
   view are separate full-width screens with a back button, instead of both
   being squeezed side by side
+- **Date separators** in chat ("Today", "Yesterday", or the full date)
+- **Upload progress ring** — see exactly how much of a large file has
+  uploaded, with a circular percentage indicator
+- **Drag-and-drop file sharing** on desktop — drop a file straight into an
+  open chat instead of only being able to browse for it
+- **Remove profile photo** — not just change it
+- Fixed: switching chats quickly no longer briefly shows the wrong
+  conversation's messages
+- Fixed: online/offline status now self-corrects every few seconds from
+  the server's live connection list, instead of only trusting push updates
+  that could occasionally be missed
+- Large file uploads now go directly from your browser to storage instead
+  of relaying through the app server — meaningfully faster for big files
 
 ## Coming in later layers
 - Push notifications

@@ -174,7 +174,10 @@ app.get('/api/contacts', authenticate, h(async (req, res) => {
      )`,
     [req.userId]
   );
-  res.json(contacts);
+  // Authoritative online status straight from the live socket map — used by
+  // the client to self-correct presence in case a push event was missed.
+  const withPresence = contacts.map((c) => ({ ...c, online: onlineUsers.has(c.id) }));
+  res.json(withPresence);
 }));
 
 // Clear a chat for yourself only — hides message history up to now on your
@@ -240,6 +243,11 @@ app.post(
   })
 );
 
+app.delete('/api/profile/avatar', authenticate, h(async (req, res) => {
+  await db.run('UPDATE users SET avatar_url = NULL WHERE id = $1', [req.userId]);
+  res.json({ ok: true });
+}));
+
 app.put('/api/profile/password', authenticate, h(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) {
@@ -260,6 +268,25 @@ app.put('/api/profile/password', authenticate, h(async (req, res) => {
 }));
 
 // ---------- media upload ----------
+
+// Direct-to-Cloudinary upload signature. The browser uploads the file
+// straight to Cloudinary using this signature — it never passes through
+// our server, which is much faster for large files (no double-hop) and
+// lets the browser show real upload progress.
+app.post('/api/upload/signature', authenticate, h(async (req, res) => {
+  if (!process.env.CLOUDINARY_URL) {
+    return res.status(500).json({ error: 'Media storage is not configured (CLOUDINARY_URL missing)' });
+  }
+  const timestamp = Math.round(Date.now() / 1000);
+  const signature = cloudinary.utils.api_sign_request({ timestamp }, cloudinary.config().api_secret);
+
+  res.json({
+    signature,
+    timestamp,
+    apiKey: cloudinary.config().api_key,
+    cloudName: cloudinary.config().cloud_name,
+  });
+}));
 
 app.post(
   '/api/upload',
@@ -341,6 +368,51 @@ app.delete('/api/messages/:messageId', authenticate, h(async (req, res) => {
   }
 
   res.json({ ok: true });
+}));
+
+const EDIT_WINDOW_MS = 15 * 60 * 1000; // matches WhatsApp's own edit window
+
+// Edit a message you sent — only within 15 minutes of sending, and only
+// while it hasn't been deleted.
+app.put('/api/messages/:messageId', authenticate, h(async (req, res) => {
+  const { text } = req.body;
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Message text cannot be empty' });
+
+  const message = await db.get('SELECT * FROM messages WHERE id = $1', [req.params.messageId]);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.from_user !== req.userId) {
+    return res.status(403).json({ error: 'You can only edit your own messages' });
+  }
+  if (message.deleted) return res.status(400).json({ error: 'Cannot edit a deleted message' });
+  if (Date.now() - Number(message.timestamp) > EDIT_WINDOW_MS) {
+    return res.status(403).json({ error: 'This message can no longer be edited (15 minute limit)' });
+  }
+
+  const trimmed = text.trim();
+  await db.run('UPDATE messages SET text = $1, edited = 1 WHERE id = $2', [trimmed, req.params.messageId]);
+
+  if (message.group_id) {
+    const members = (
+      await db.all('SELECT user_id FROM group_members WHERE group_id = $1', [message.group_id])
+    ).map((m) => m.user_id);
+    members.forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) io.to(sockId).emit('message_edited', { id: message.id, text: trimmed, groupId: message.group_id });
+    });
+  } else {
+    [message.from_user, message.to_user].forEach((uid) => {
+      const sockId = onlineUsers.get(uid);
+      if (sockId) {
+        io.to(sockId).emit('message_edited', {
+          id: message.id,
+          text: trimmed,
+          otherId: uid === message.from_user ? message.to_user : message.from_user,
+        });
+      }
+    });
+  }
+
+  res.json({ ok: true, text: trimmed });
 }));
 
 // Mark all messages from `otherId` to me as read
